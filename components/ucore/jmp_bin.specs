@@ -1,0 +1,381 @@
+# Version 5 of the Jupyter Messaging Protocol in binary
+Note: mulitbyte fields must be read in the big endian format in accordance with binrpc specs. 
+Note: string fields are utf-8 (not that it needs to be said)
+Each JMP message has the format:
+    {
+    "header": { ... },
+    "parent_header": { ... },
+    "metadata": { ... },
+    "content": { ... },
+    "buffers": [ ... ]
+    }
+in binrpc payload we represent the  outline as:
+    header_len (uint16[]):
+    parent_header_len (uint16[])
+    metadata_len (uint16[])
+    content_len (uint16[])
+    buffers_len (uint16[])
+    header (uint8[])
+    parent_header (uint8[])
+    metadata (uint8[])
+    content (uint8[])
+    buffers (uint8[])
+Note that for now buffers is unused but we keep the field in the header as it will be used in the future. also metadata is unused. 
+
+## Message types
+the message types are mapped as follows:
+| Jupyter Msg Type         | `jupyter_type` | Channel | Direction         | Notes                  |
+| ------------------------ | -------------- | ------- | ----------------- | ---------------------- |
+| `kernel_info_request`    | 0x01           | shell   | frontend → kernel |                        |
+| `kernel_info_reply`      | 0x02           | shell   | kernel → frontend |                        |
+| `execute_request`        | 0x03           | shell   | frontend → kernel | With code              |
+| `execute_reply`         | 0x04           | iopub   | kernel → frontend | Output result          |
+| `stream` (stdout/stderr) | 0x05           | iopub   | kernel → frontend | Standard output stream |
+| `error`                  | 0x06           | iopub   | kernel → frontend | Traceback info         |
+| `display_data`           | 0x07           | iopub   | kernel → frontend | Rich output            |
+| `status`                 | 0x08           | iopub   | kernel → frontend | busy/idle              |
+| `input_request`          | 0x09           | stdin   | kernel → frontend | Prompt for user input  |
+| `input_reply`            | 0x0A           | stdin   | frontend → kernel | User's input string    |
+| `complete_request`       | 0x0B           | shell   | frontend → kernel | Autocomplete           |
+| `complete_reply`         | 0x0C           | shell   | kernel → frontend | Completion options     |
+| `inspect_request`        | 0x0D           | shell   | frontend → kernel | Help or tooltip        |
+| `inspect_reply`          | 0x0E           | shell   | kernel → frontend | Response with info     |
+| `is_complete_request`    | 0x0F           | shell   | frontend → kernel | Used by REPL           |
+| `is_complete_reply`      | 0x10           | shell   | kernel → frontend |                        |
+| `shutdown_request`       | 0x11           | control | frontend → kernel |                        |
+| `shutdown_reply`         | 0x12           | control | kernel → frontend |                        |
+| `interrupt_request`      | 0x13           | control | frontend → kernel |                        |
+
+comms messages
+| ------------ | -------- | ------- | ----------------- | ------------------------ |
+| `comm_open`  | 0x14     | control | frontend ↔ kernel | Opens a comm             |
+| `comm_msg`   | 0x15     | control | frontend ↔ kernel | Sends data over the comm |
+| `comm_close` | 0x16     | control | frontend ↔ kernel | Closes the comm          |
+
+## Messages on the shell (ROUTER/DEALER) channel
+In general, the ROUTER/DEALER sockets follow a request-reply pattern:
+a. The client sends an <action>_request (e.g., execute_request) on the shell (DEALER) socket.
+b. The kernel immediately publishes a status: busy message on the IOPub channel.
+c. After processing, the kernel sends the corresponding <action>_reply (e.g., execute_reply) on the shell socket.
+d. It may also emit additional IOPub messages (e.g., stream, error, etc.).
+e. Finally, the kernel publishes a status: idle message on IOPub to indicate completion of the request.
+f. Any of header, parent_header, metadata, content, or buffers may be omitted by setting their length to zero (*_len = 0).
+
+The 'status' key(field) can take three values: 
+    in json: ok, error and abort
+    in binary: 0, 1 and 2
+When status =‘error’, the usual 'content' field of a successful reply is absent, instead the following field should be present:
+*content in json
+    {
+    'status' : 'error',
+    'ename' : str,   # Exception name, as a string
+    'evalue' : str,  # Exception value, as a string
+    'traceback' : list(str), # traceback frames as strings
+    }
+*content in binary.
+status: uint8 
+if status is 1, we have the payload format:
+status: uint8
+ename_len: uint16
+ename: uint8[]
+evalue_len: uint16
+evalue: uint8[]
+traceback_len: uint16
+traceback:uint8[]    
+execution_count: uint16_t (this field is only required in execution_reply when script errored out)
+for status, status='abort': This is the same as status='error' but with no information about the error. No fields should be present other that status in the content field.
+
+for status=ok(status=0), content will depend on msg_type. 
+
+# Various parts of the payloads
+a. header: 
+*header in json
+    {
+        "msg_id": str,        # unique per message (UUID)
+        "session": str,       # unique per session (UUID)
+        "username": str,
+        "date": str,          # ISO 8601 timestamp
+        "msg_type": str,      # see allowed types
+        "version": "5.0",     # protocol version
+    }
+
+
+*header in binary (type 1):
+    msg_id: uint32
+    session_id: uint32
+    username_len: uint16
+    username: uint8[]
+    msg_type: uint8 
+    version: uint8[3]   (byte[0], byte[1] and byte[2] is major, minor and patch respectively)
+
+*header in binary (type 2):
+    msg_id_len: uint16
+    msg_id: uint8[]
+    session_id_len: uint16
+    session_id; uint8[]
+    username_len: uint16
+    username: uint8[]
+    msg_type: uint8 
+    version: uint8[3]   (byte[0], byte[1] and byte[2] is major, minor and patch respectively)
+
+Note: in the binary representation for type 1, the msg_id and session_id must be 4 bytes (implmenter can use epoch timestamps or truncate uuids whichever fits). when going from json -> binrpc, convert them appropirately. This just means that the translation server have to be more complex as it tracks state. 
+
+or just use type 2 header (at the expense of memory effieciency of course)
+b. parent_header
+this field when present, should point back to the header of the previous request it is part of. 
+examples are stream, error payloads. 
+
+c. metadata (unused for now, len is always zero)
+
+d. content depends on msg_type
+
+e. buffers (unused for now, len is always zero)
+
+# Various msg_types 
+1. msg_type= execute_request
+*`content` field in json:
+    content = {
+        'code': str,               # Code to execute.
+        'silent': bool,            # If True, no output is shown or stored.
+        'store_history': bool,     # If True, adds code to execution history.
+        'user_expressions': dict,  # Extra expressions to evaluate after code runs.
+        'allow_stdin': bool,       # If True, code can request user input.
+        'stop_on_error': bool,     # If True, stop execution queue on error.
+    }
+
+*`content` field in binary:
+    code_len:uint16
+    code: uint8[]
+    flags: uint8
+    flags[0] = silent
+    flags[1] = store_history
+    flags[2] = allow_stdin
+    flags[3] = stop_on_error
+
+Note: user_expressions is unsupported for now
+2. execute_reply
+*`content` field in json:
+    content = {
+        "status": str,            # 'ok', 'error', or 'aborted'
+        "execution_count": int,   # global kernel counter
+    }
+
+*`content` field in binary:
+    status: uint8 (only when status=ok, else refer to error handling)
+    execution_count: uint16
+
+Note: In order to obtain the current execution counter for the purposes of displaying input prompts, frontends may make an execution request with an empty code string and silent=True.
+
+3. kernel_info_request 
+*`content` field in json:
+    {}
+*`content` field in binary:
+(empty)
+kernel_info_reply
+*`content` field in json:
+content = {
+    "status": "ok",  # 'ok' or 'error'
+
+    "protocol_version": "X.Y.Z",         # Messaging protocol version
+    "implementation": str,              # Kernel name (e.g. 'ipython')
+    "implementation_version": "X.Y.Z",  # Kernel version
+
+    "language_info": {
+        "name": str,                   # Language name (e.g. 'python')
+        "version": "X.Y.Z",            # Language version
+        "mimetype": str,               # e.g. 'text/x-python'
+        "file_extension": str,         # e.g. '.py'
+    },
+
+    "banner": str,      # Info displayed in console environments
+    "debugger": bool,   # Kernel supports debugger (default: False)
+
+}
+
+*`content` field in binary:
+status: uint8 
+protocol_version: uint8[3] (byte[0], byte[1] and byte[2] is major, minor and patch respectively)
+implementation_len: uint16
+implementation: uint8[]
+implementation_version: uint8[3] (byte[0], byte[1] and byte[2] is major, minor and patch respectively)
+language_info.name_len : uint16
+language_info.name: uint8[]
+language_info.version: uint8[3] (byte[0], byte[1] and byte[2] is major, minor and patch respectively)
+language_info.mimetype_len: uint16
+language_info.mimetype: uint8[]
+language_info.file_extension_len: uint16
+language_info.file_extension: uint8[]
+banner_len: uint16
+banner: uint8[]
+debugger: uint8 (boolean)
+
+## Messages on the Control (ROUTER/DEALER) channel
+shutdown_request
+*`content` field in json:
+content = {
+    'restart' : bool # False if final shutdown, or True if shutdown precedes a restart
+}
+
+*`content` field in binary:
+restart: uint8 (boolean)
+shutdown_reply
+*`content` field in json:
+content = {
+    "status": "ok",       # 'ok' or 'error'
+    "restart": bool,      # True if restarting, False if final shutdown
+}
+
+*`content` field in binary::
+status: uint8 (bool)
+restart: uint8 (bool)
+
+## Messages on the IOPub (PUB/SUB) channel
+msg_type = stream
+*`content` field in json:
+content = {
+    'name' : str, # The name of the stream is one of 'stdout', 'stderr'
+    'text' : str, # The text is an arbitrary string to be written to that stream
+}
+
+*`content` field in binary:
+name: uint8[] (0 = stdout, 1 = stderr)
+text_len: uint16
+text: uint8[]
+
+msg_type = status
+*`content` field in json:
+content = {
+    # When the kernel starts to handle a message, it will enter the 'busy'
+    # state and when it finishes, it will enter the 'idle' state.
+    # The kernel will publish state 'starting' exactly once at process startup.
+    execution_state : ('busy', 'idle', 'starting')
+}
+
+*`content` field in binary:
+execution_state: uint8 (0 = busy, 1=idle, 2=starting)
+
+input_request
+*`content` field in json:
+content = {
+    # the text to show at the prompt
+    'prompt' : str,
+    # Is the request for a password?
+    # If so, the frontend shouldn't echo input.
+    'password' : bool
+}
+*`content` field in binary:
+prompt_len: uint16
+prompt: uint8[]
+password: uint8 (bool )
+
+input_reply
+*`content` field in json:
+content = { 'value' : str }
+*`content` field in binary:
+value_len: uint16
+value: uint8[]
+
+#packets not used for control between relay server and connected clients
+#the parent header of these messages coming from server (only auth_request orignates from client) will 
+#carry the parent header of the client request that errored out. 
+auth_request (client to server): 0x64
+content field:
+device_id_len: uint16
+device_id: uint8[]
+timestamp: uint32
+hmac: uint8[32]
+
+auth_reply (server to kernel): 0x65
+content field
+status: uint8 (0= ok, else error content as in others)
+
+target_not_found 0x66
+{}
+
+#this error means the max number of frontends per device already reached. 
+kernel_limit_reached 0x67
+{}
+
+# Message Type: comm_open
+
+JSON
+{
+  'comm_id'     : 'u-u-i-d',
+  'target_name' : 'notification',
+  'data'        : {}
+}
+
+Binary
+uint16   comm_id_len
+uint8[]  comm_id
+uint16   target_id (the converter should make a map that maps id to the target_name)
+# data: none
+
+# Message Type: comm_msg (target_name = "notification")
+
+JSON
+{
+  'comm_id': 'u-u-i-d',
+  'data': {
+    "to_restart": bool,
+    "restarted": bool,
+    "free_heap": int,
+    "uptime": int
+  }
+}
+
+Binary
+uint16   comm_id_len
+uint8[]  comm_id
+
+# data
+uint8    to_restart    # 0 = false, 1 = true
+uint8    restarted     # 0 = false, 1 = true
+uint32   free_heap     # bytes
+uint32   uptime        # ms or s
+
+# Message Type: comm_close
+
+JSON
+{
+  'comm_id': 'u-u-i-d',
+  'data'   : {}
+}
+
+Binary
+uint16   comm_id_len
+uint8[]  comm_id
+# data: none
+
+#complete_request
+{
+    "code": "a.isal",
+    "cursor_pos": 6
+}
+
+binary
+code_len (uint16)
+code (uint8[])
+cursor_pos (uint16)
+
+#complete Response
+{
+    "matches": ["a.isalnum", "a.isalpha"],
+    "cursor_start": 2,
+    "cursor_end": 6,
+    "metadata": {},
+    "status": "ok"
+}
+
+#binary
+matches_no: uint16
+match_1_len: uint16
+match_1: uint8[]
+    ...
+match_n_len uint16
+match_n: uint8[]
+cursor_start: uint16
+cursor_end: uint16
+metadata_len: uint16 (always 0, not used for now)
+metadata: uint8 (absent, not used)
+status: uint8
