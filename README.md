@@ -1,2 +1,2 @@
-# nocode-ucore
-mcu firmware for programming using natural language
+# ucore
+ucore is a jupyter kernel for esp32-based microcontrollers. the interpreter is micropython. 
