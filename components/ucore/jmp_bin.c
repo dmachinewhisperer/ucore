@@ -207,6 +207,7 @@ int jmp_serialize_error(uint8_t *buf, size_t buf_len, const jmp_error_t *error, 
     *out_len = pos;
     return BINRPC_OK;
 }
+
 int jmp_deserialize_error(const uint8_t *buf, size_t buf_len, jmp_error_t *error, size_t *out_len) {
     if (!buf || !error || !out_len) {
         return BINRPC_ERR_INVALID_DATA;
@@ -370,93 +371,7 @@ int jmp_deserialize_shutdown_request(const uint8_t *buf, size_t buf_len, jmp_shu
 }
 
 // Header serialization/deserialization
-/** //old implementation 
-int jmp_serialize_header(uint8_t *buf, size_t buf_len, jmp_header_t *header, size_t *out_len) {
-    if (!buf || !header || !out_len) {
-        return BINRPC_ERR_INVALID_DATA;
-    }
-    
-    size_t pos = 0;
-    int ret;
-    
-    // Write msg_id
-    if (check_buffer_space(pos, 4, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
-    }
-    write_uint32_be(buf + pos, header->msg_id);
-    pos += 4;
-    
-    // Write session_id
-    if (check_buffer_space(pos, 4, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
-    }
-    write_uint32_be(buf + pos, header->session_id);
-    pos += 4;
-    
-    // Write username
-    ret = write_string_field(buf, buf_len, &pos, header->username_len, header->username);
-    if (ret != BINRPC_OK) return ret;
-    
-    // Write msg_type
-    if (check_buffer_space(pos, 1, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
-    }
-    buf[pos++] = header->msg_type;
-    
-    // Write version
-    if (check_buffer_space(pos, 3, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
-    }
-    memcpy(buf + pos, header->version, 3);
-    pos += 3;
-    
-    *out_len = pos;
-    return BINRPC_OK;
-}
 
-int jmp_deserialize_header(uint8_t *buf, size_t buf_len, jmp_header_t *header, size_t *out_len) {
-    if (!buf || !header || !out_len) {
-        return BINRPC_ERR_INVALID_DATA;
-    }
-    
-    size_t pos = 0;
-    int ret;
-    
-    // Read msg_id
-    if (check_buffer_space(pos, 4, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
-    }
-    header->msg_id = read_uint32_be(buf + pos);
-    pos += 4;
-    
-    // Read session_id
-    if (check_buffer_space(pos, 4, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
-    }
-    header->session_id = read_uint32_be(buf + pos);
-    pos += 4;
-    
-    // Read username
-    ret = read_string_field(buf, buf_len, &pos, &header->username_len, &header->username);
-    if (ret != BINRPC_OK) return ret;
-    
-    // Read msg_type
-    if (check_buffer_space(pos, 1, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
-    }
-    header->msg_type = buf[pos++];
-    
-    // Read version
-    if (check_buffer_space(pos, 3, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
-    }
-    memcpy(header->version, buf + pos, 3);
-    pos += 3;
-    
-    *out_len = pos;
-    return BINRPC_OK;
-}
-*/
 int jmp_serialize_header(uint8_t *buf, size_t buf_len, const jmp_header_t *header, size_t *out_len) {
     if (!buf || !header || !out_len) {
         return BINRPC_ERR_INVALID_DATA;

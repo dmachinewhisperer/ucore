@@ -97,6 +97,10 @@ typedef struct {
     uint16_t execution_count;
 } jmp_execute_reply_t;
 
+// according to the the specs, this error message 
+// forms the content of _reply messages when the status is error
+// also, there is a dedicated message called error (literal) aside from this expected on IOPub 
+// when execution fails. error messages are not expected to have exectuion_count and status fields.
 typedef struct {
     uint8_t status;          // Must be 1
     uint16_t ename_len;
@@ -104,7 +108,7 @@ typedef struct {
     uint16_t evalue_len;
     uint8_t *evalue;
     uint16_t traceback_len;
-    uint8_t *traceback; // Assume joined as a single UTF-8 blob, separated by '\n'
+    uint8_t *traceback; // string of joined lines, separated by '\n'
     uint16_t execution_count;   //special case, only used for execute_reply failures
 } jmp_error_t;
 
