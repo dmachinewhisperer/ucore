@@ -57,6 +57,7 @@
 #include "py/misc.h"
 #include "py/runtime.h"
 #include "py/obj.h"
+#include "py/mpprint.h"
 #include "extmod/vfs.h"
 #include "esp_log.h"
 
@@ -403,131 +404,111 @@ int readline_over_jmp(vstr_t *line, const char *prompt) {
 }
 
 //core mpy vm bindings
+
 int execute_str(const char *source, int len, jmp_error_t *err) {
     memset(err, 0, sizeof(jmp_error_t));
-
+    
     mp_lexer_t *lex = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, source, len, 0);
     if (lex == NULL) {
         err->status = STATUS_ERROR;
-    
         const char *ename_str = "LexerError";
         const char *evalue_str = "Failed to tokenize input";
-    
+        
         err->ename_len = strlen(ename_str);
         err->ename = (uint8_t *)malloc(err->ename_len + 1);
         memcpy(err->ename, ename_str, err->ename_len + 1);
-    
+        
         err->evalue_len = strlen(evalue_str);
         err->evalue = (uint8_t *)malloc(err->evalue_len + 1);
         memcpy(err->evalue, evalue_str, err->evalue_len + 1);
-    
+        
         err->traceback_len = 0;
         err->traceback = NULL;
-    
         return __PYEXEC_LEXER_FAIL;
     }
     
     nlr_buf_t nlr;
-    //int ret = __PYEXEC_FAIL;
-
     if (nlr_push(&nlr) == 0) {
+        // Success path - execute the code
         mp_parse_tree_t parse_tree = mp_parse(lex, MP_PARSE_FILE_INPUT);
         mp_obj_t module_fun = mp_compile(&parse_tree, lex->source_name, false);
         mp_call_function_0(module_fun);
         mp_handle_pending(true);
         nlr_pop();
         gc_collect();
+        
         err->status = STATUS_OK;
         return __PYEXEC_SUCCESS;
     } else {
-        mp_obj_t exc = MP_OBJ_FROM_PTR(nlr.ret_val);
-        err->status = STATUS_ERROR;
-
-        const char *ename_str = qstr_str(((mp_obj_type_t *)mp_obj_get_type(exc))->name);
-        err->ename_len = strlen(ename_str);
-        err->ename = (uint8_t *)malloc(err->ename_len + 1);
-        memcpy(err->ename, ename_str, err->ename_len + 1);
-
-        //
-        //mp_obj_t str_exc = mp_obj_str_get(exc);
-        const char *evalue_str = mp_obj_str_get_str(exc);
-        err->evalue_len = strlen(evalue_str);
-        err->evalue = (uint8_t *)malloc(err->evalue_len + 1);
-        memcpy(err->evalue, evalue_str, err->evalue_len + 1);
-
-        size_t n, *values;
-        mp_obj_exception_get_traceback(exc, &n, &values);
-
-        vstr_t vstr;
-        vstr_init(&vstr, 64);
-        if (n > 0 && n % 3 == 0) {
-            vstr_printf(&vstr, "Traceback (most recent call last):\n");
-            for (int i = n - 3; i >= 0; i -= 3) {
-                const char *file = qstr_str(values[i]);
-                int lineno = (int)values[i + 1];
-                const char *func = (values[i + 2] == MP_QSTRnull) ? NULL : qstr_str(values[i + 2]);
-                #if MICROPY_ENABLE_SOURCE_LINE
-                vstr_printf(&vstr, "  File \"%s\", line %d", file, lineno);
-                #else
-                vstr_printf(&vstr, "  File \"%s\"", file);
-                #endif
-                if (func != NULL) {
-                    vstr_printf(&vstr, ", in %s", func);
-                }
-                vstr_printf(&vstr, "\n");
+        // Exception caught - now we need to safely extract info
+        // Wrap this in ANOTHER nlr_push to catch any exceptions during extraction
+        nlr_buf_t nlr2;
+        if (nlr_push(&nlr2) == 0) {
+            mp_obj_t exc = MP_OBJ_FROM_PTR(nlr.ret_val);
+            err->status = STATUS_ERROR;
+            
+            const char *ename_str = qstr_str(((mp_obj_type_t *)mp_obj_get_type(exc))->name);
+            err->ename_len = strlen(ename_str);
+            err->ename = (uint8_t *)malloc(err->ename_len + 1);
+            memcpy(err->ename, ename_str, err->ename_len + 1);
+            
+            vstr_t eval_vstr;
+            mp_print_t eval_print;
+            vstr_init_print(&eval_vstr, 64, &eval_print);
+            mp_obj_print_helper(&eval_print, exc, PRINT_STR);
+            
+            err->evalue_len = eval_vstr.len;
+            err->evalue = (uint8_t *)malloc(err->evalue_len + 1);
+            memcpy(err->evalue, eval_vstr.buf, eval_vstr.len);
+            err->evalue[eval_vstr.len] = '\0';
+            vstr_clear(&eval_vstr);
+            
+            vstr_t vstr;
+            mp_print_t print;
+            vstr_init_print(&vstr, 64, &print);
+            
+            mp_obj_print_exception(&print, exc);
+            
+            err->traceback_len = vstr.len;
+            err->traceback = (uint8_t *)malloc(vstr.len + 1);
+            memcpy(err->traceback, vstr.buf, vstr.len);
+            err->traceback[vstr.len] = '\0';
+            
+            //printf("Extracted traceback (len=%d):\n%s", err->traceback_len, err->traceback);
+            
+            vstr_clear(&vstr);
+            
+            nlr_pop();  // Pop the nlr2 handler
+            gc_collect();
+            
+            if (mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(((mp_obj_base_t *)nlr.ret_val)->type), 
+                                         MP_OBJ_FROM_PTR(&mp_type_SystemExit))) {
+                return PYEXEC_FORCED_EXIT;
+            } else {
+                return __PYEXEC_NLR_FAIL;
             }
-        }
-
-        err->traceback_len = vstr.len;
-        err->traceback = (uint8_t *)malloc(vstr.len + 1);
-        memcpy(err->traceback, vstr.buf, vstr.len + 1);
-
-        vstr_clear(&vstr);
-        gc_collect();
-
-        if (mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(((mp_obj_base_t *)nlr.ret_val)->type),
-                                    MP_OBJ_FROM_PTR(&mp_type_SystemExit))) {
-            return PYEXEC_FORCED_EXIT;
         } else {
+            // Failed while trying to extract exception info
+            err->status = STATUS_ERROR;
+            const char *ename_str = "InternalError";
+            const char *evalue_str = "Exception handling failed";
+            
+            err->ename_len = strlen(ename_str);
+            err->ename = (uint8_t *)malloc(err->ename_len + 1);
+            memcpy(err->ename, ename_str, err->ename_len + 1);
+            
+            err->evalue_len = strlen(evalue_str);
+            err->evalue = (uint8_t *)malloc(err->evalue_len + 1);
+            memcpy(err->evalue, evalue_str, err->evalue_len + 1);
+            
+            err->traceback_len = 0;
+            err->traceback = NULL;
+            
             return __PYEXEC_NLR_FAIL;
         }
     }
-
-    return __PYEXEC_SUCCESS;
 }
 
-/*
-static int execute_str(const char *source, int len) {
-    mp_lexer_t *lex = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, source, len, 0);
-    if (lex == NULL) {
-        return __PYEXEC_LEXER_FAIL;
-    }
-
-    nlr_buf_t nlr;
-    int ret = __PYEXEC_FAIL;
-
-    if (nlr_push(&nlr) == 0) {
-        mp_parse_tree_t parse_tree = mp_parse(lex, MP_PARSE_FILE_INPUT);
-        mp_obj_t module_fun = mp_compile(&parse_tree, lex->source_name, false);
-        mp_call_function_0(module_fun);
-        mp_handle_pending(true);
-        nlr_pop();
-        ret = __PYEXEC_SUCCESS;
-    } else {
-        mp_obj_print_exception(&mp_plat_print, MP_OBJ_FROM_PTR(nlr.ret_val));
-        if (mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(((mp_obj_base_t *)nlr.ret_val)->type), 
-                                    MP_OBJ_FROM_PTR(&mp_type_SystemExit))) {
-            ret = PYEXEC_FORCED_EXIT;
-        } else {
-            ret = __PYEXEC_NLR_FAIL;
-        }
-    }
-
-    gc_collect();
-
-    return ret;
-}
-*/
 /*
 both mp_hal_stdout_net_tx_strn and mp_hal_stdout_net_tx_strn_cooked(orignal names without _pusher)
  are taken from 
@@ -672,6 +653,7 @@ soft_reset:
 
                     //if code lenght is zero, frontend expects kernel to not execute 
                     //anything but instead send the curernt execution count. 
+                    //note that error init needs to be before the goto so that error is defined
                     jmp_error_t error = {0};
 
                     if(execute_req.code_len == 0){
@@ -685,11 +667,11 @@ soft_reset:
                 response:
                     size_t header_len = 0, content_len = 0, max_len = 0, offset = 0; 
                     if(exit_code == 0) { //buf_len = header + parent_header + content (reply or error)
-                        max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) +2 * UCORE_MAX_ID_LEN + 
+                        max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN + 
                                     msg.header_len + sizeof(jmp_execute_reply_t);
                     } else{
-                        max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + msg.header_len + 
-                                    sizeof(jmp_error_t) + error.ename_len + error.evalue_len + error.traceback_len;
+                        max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN + 
+                                    msg.header_len + sizeof(jmp_error_t) + error.ename_len + error.evalue_len + error.traceback_len;
                     }
 
                     // malloc failure is fatal, it means we are out 
@@ -728,13 +710,39 @@ soft_reset:
                     } 
                     else{
                         error.execution_count = kcontext.execution_count;
-                        jmp_serialize_error(payload + offset, max_len - offset, &error, &content_len);
+                        int ret = jmp_serialize_error(payload + offset, max_len - offset, &error, &content_len);
+                        printf("jmp_serialize_error return code: %d", ret);
                     }
                     offset += content_len; 
                     jmp_add_msg_prefix(payload + UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN, header_len, msg.header_len, 0, content_len, 0);
                     memcpy(payload, pkt.payload, UCORE_SANS_PREFIX_LEN);
                     //websocket_bin_tx(websock, payload, offset);   
                     kcontext.transport.bin_tx(kcontext.transport_ctx, payload, offset); 
+
+                    //in the case of error , we need to form another message that is sent to IoPub. 
+                    // this message is of type JMP_ERROR and has the same content as status=error messages. 
+                    // Note that we only need to drop in error header into the already formatted  payload
+                    if(exit_code != 0){
+                        jmp_header_t error_header = {
+                            .msg_id_len = (uint16_t)ucore_uuid(uuid),
+                            .msg_id = (uint8_t*)uuid,
+                            .session_id_len = req_header.session_id_len,
+                            .session_id = req_header.session_id, 
+                            .username_len = 0,
+                            .username = NULL,
+                            .msg_type = JMP_ERROR,
+                            .version = UCORE_KERNEL_JMP_VERSION
+                        };
+                        
+                        header_len = 0;
+                        int payload_len = offset; 
+                        offset = 0;
+                        offset += UCORE_SANS_PREFIX_LEN; 
+                        offset += JMP_MSG_PREFIX_LEN;
+                        jmp_serialize_header(payload + offset, max_len - offset, &error_header, &header_len);
+
+                        kcontext.transport.bin_tx(kcontext.transport_ctx, payload, payload_len); 
+                    }
 
                 
                 execute_req_cleanup:
