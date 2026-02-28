@@ -49,9 +49,9 @@ the message types are mapped as follows:
 
 comms messages
 | ------------ | -------- | ------- | ----------------- | ------------------------ |
-| `comm_open`  | 0x14     | control | frontend ↔ kernel | Opens a comm             |
-| `comm_msg`   | 0x15     | control | frontend ↔ kernel | Sends data over the comm |
-| `comm_close` | 0x16     | control | frontend ↔ kernel | Closes the comm          |
+| `comm_open`  | 0x15     | control | frontend ↔ kernel | Opens a comm             |
+| `comm_msg`   | 0x16     | control | frontend ↔ kernel | Sends data over the comm |
+| `comm_close` | 0x17     | control | frontend ↔ kernel | Closes the comm          |
 
 
 
