@@ -48,11 +48,12 @@ typedef enum {
     JMP_SHUTDOWN_REQUEST       = 0x11,
     JMP_SHUTDOWN_REPLY         = 0x12,
     JMP_INTERRUPT_REQUEST      = 0x13,
+    JMP_EXECUTE_RESULT         = 0x14,
 
     //comms messages
-    JMP_COMM_OPEN              = 0x14,
-    JMP_COMM_MSG               = 0x15,
-    JMP_COMM_CLOSE             = 0x16,
+    JMP_COMM_OPEN              = 0x15,
+    JMP_COMM_MSG               = 0x16,
+    JMP_COMM_CLOSE             = 0x17,
 
     //variants of comm_msg
     //JMP_COMM_NOTIFICATION_MSG  = 0x17,
