@@ -250,6 +250,18 @@ typedef struct {
     uint8_t status;        
 } jmp_complete_reply_t;
 
+typedef struct {
+    uint16_t execution_count;
+    uint16_t data_count;
+    uint16_t *data_keys_len;
+    uint8_t **data_keys;
+    uint16_t *data_values_len;
+    uint8_t **data_values;
+
+    uint16_t cursor_start;
+
+    uint16_t metadata_count;  // always 0, but included for completeness  
+} jmp_execute_result_t;
 
 //parts of the message payload that orignate from the kernel only need a serialize function. 
 int jmp_serialize_execute_reply(uint8_t *buf, size_t buf_len, const jmp_execute_reply_t *execute_rep, size_t *out_len);
@@ -302,4 +314,8 @@ int jmp_deserialize_comm_close(const uint8_t *buf, size_t buf_len, jmp_comm_clos
 int jmp_deserialize_complete_request(const uint8_t *buf, size_t buf_len, jmp_complete_request_t *req, size_t *out_len);
 int jmp_serialize_complete_reply(uint8_t *buf, size_t buf_len, const jmp_complete_reply_t *reply, size_t *out_len);
 
+//jupter messaging protocol specifies that the result of constant expressions 
+// (at the end of code to execute) should be produced 
+// as an execute_result 
+int jmp_serialize_execute_result(uint8_t *buf, size_t buf_len, const jmp_execute_result_t *result, size_t *out_len);
 #endif

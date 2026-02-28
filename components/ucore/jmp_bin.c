@@ -825,3 +825,36 @@ int jmp_serialize_complete_reply(uint8_t *buf, size_t buf_len, const jmp_complet
     *out_len = pos;
     return BINRPC_OK;
 }
+
+int jmp_serialize_execute_result(uint8_t *buf, size_t buf_len, const jmp_execute_result_t *result, size_t *out_len) {
+    if (!buf || !result || !out_len) {
+        return BINRPC_ERR_INVALID_DATA;
+    }
+
+    size_t pos = 0;
+    int ret;
+
+    if (check_buffer_space(pos, 2, buf_len) != 0) return BINRPC_ERR_BUFFER_TOO_SMALL;
+    write_uint16_be(buf + pos, result->execution_count);
+    pos += 2;
+
+    if (check_buffer_space(pos, 2, buf_len) != 0) return BINRPC_ERR_BUFFER_TOO_SMALL;
+    write_uint16_be(buf + pos, result->data_count);
+    pos += 2;
+
+    for (uint16_t i = 0; i < result->data_count; i++) {
+        ret = write_string_field(buf, buf_len, &pos, result->data_keys_len[i], result->data_keys[i]);
+        if (ret != BINRPC_OK) return ret;
+
+        ret = write_string_field(buf, buf_len, &pos, result->data_values_len[i], result->data_values[i]);
+        if (ret != BINRPC_OK) return ret;
+    }
+
+    if (check_buffer_space(pos, 2, buf_len) != 0) return BINRPC_ERR_BUFFER_TOO_SMALL;
+    write_uint16_be(buf + pos, result->metadata_count);
+    pos += 2;
+
+    *out_len = pos;
+    return BINRPC_OK;
+}
+
