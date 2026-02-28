@@ -45,12 +45,15 @@ the message types are mapped as follows:
 | `shutdown_request`       | 0x11           | control | frontend → kernel |                        |
 | `shutdown_reply`         | 0x12           | control | kernel → frontend |                        |
 | `interrupt_request`      | 0x13           | control | frontend → kernel |                        |
+    execute_result           0x14             iopub     kernel → frontend
 
 comms messages
 | ------------ | -------- | ------- | ----------------- | ------------------------ |
 | `comm_open`  | 0x14     | control | frontend ↔ kernel | Opens a comm             |
 | `comm_msg`   | 0x15     | control | frontend ↔ kernel | Sends data over the comm |
 | `comm_close` | 0x16     | control | frontend ↔ kernel | Closes the comm          |
+
+
 
 ## Messages on the shell (ROUTER/DEALER) channel
 In general, the ROUTER/DEALER sockets follow a request-reply pattern:
@@ -379,3 +382,37 @@ cursor_end: uint16
 metadata_len: uint16 (always 0, not used for now)
 metadata: uint8 (absent, not used)
 status: uint8
+
+# Message type; execute_result
+json:
+content = {
+
+    # Who create the data
+    # Used in V4. Removed in V5.
+    # 'source' : str,
+
+    # The data dict contains key/value pairs, where the keys are MIME
+    # types and the values are the raw data of the representation in that
+    # format.
+    'data' : dict,
+
+    # Any metadata that describes the data
+    'metadata' : dict,
+}
+
+binary:
+execution_count: uint16
+data_count: uint16
+data_key_1_len: uint16
+data_key_1: uint8[]
+data_value_1_len: uint16
+data_value_1: uint8[]
+...
+data_key_n_len: uint16
+data_key_n: uint8[]
+data_value_n_len: uint16
+data_value_n: uint8[]
+
+metadata uint16 (not used for now)
+
+
