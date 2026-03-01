@@ -41,6 +41,55 @@ static SemaphoreHandle_t serial_write_mutex;
     xSemaphoreGive(serial_write_mutex);                          \
 } while (0)
 
+static const char* jmp_msg_type_to_str(uint8_t type) {
+    switch (type) {
+        case JMP_KERNEL_INFO_REQUEST: return "KERNEL_INFO_REQUEST";
+        case JMP_KERNEL_INFO_REPLY:   return "KERNEL_INFO_REPLY";
+        case JMP_EXECUTE_REQUEST:     return "EXECUTE_REQUEST";
+        case JMP_EXECUTE_REPLY:       return "EXECUTE_REPLY";
+        case JMP_STREAM:              return "STREAM";
+        case JMP_ERROR:               return "ERROR";
+        case JMP_DISPLAY_DATA:        return "DISPLAY_DATA";
+        case JMP_STATUS:              return "STATUS";
+        case JMP_INPUT_REQUEST:       return "INPUT_REQUEST";
+        case JMP_INPUT_REPLY:         return "INPUT_REPLY";
+        case JMP_COMPLETE_REQUEST:    return "COMPLETE_REQUEST";
+        case JMP_COMPLETE_REPLY:      return "COMPLETE_REPLY";
+        case JMP_INSPECT_REQUEST:     return "INSPECT_REQUEST";
+        case JMP_INSPECT_REPLY:       return "INSPECT_REPLY";
+        case JMP_IS_COMPLETE_REQUEST: return "IS_COMPLETE_REQUEST";
+        case JMP_IS_COMPLETE_REPLY:   return "IS_COMPLETE_REPLY";
+        case JMP_SHUTDOWN_REQUEST:    return "SHUTDOWN_REQUEST";
+        case JMP_SHUTDOWN_REPLY:      return "SHUTDOWN_REPLY";
+        case JMP_INTERRUPT_REQUEST:   return "INTERRUPT_REQUEST";
+        case JMP_EXECUTE_RESULT:      return "EXECUTE_RESULT";
+        case JMP_COMM_OPEN:           return "COMM_OPEN";
+        case JMP_COMM_MSG:            return "COMM_MSG";
+        case JMP_COMM_CLOSE:          return "COMM_CLOSE";
+        case JMP_AUTH_REQUEST:        return "AUTH_REQUEST";
+        case JMP_AUTH_REPLY:          return "AUTH_REPLY";
+        case TARGET_NOT_FOUND:        return "TARGET_NOT_FOUND";
+        default:                      return "UNKNOWN";
+    }
+}
+
+static uint8_t get_jmp_msg_type(const uint8_t *payload, int len) {
+    if (len < 46) return 0xFF;
+    const uint8_t *h_buf = payload + 46; // Skip SANS (36) and MSG_PREFIX (10)
+    int h_len = len - 46;
+    
+    size_t pos = 0;
+    // Skip msg_id, session_id, and username length-prefixed strings
+    for (int i = 0; i < 3; i++) {
+        if (pos + 2 > h_len) return 0xFF;
+        uint16_t field_len = (h_buf[pos] << 8) | h_buf[pos + 1];
+        pos += 2 + field_len;
+    }
+    
+    if (pos >= h_len) return 0xFF;
+    return h_buf[pos];
+}
+
 
 // Context structure to maintain serial connection state
 typedef struct {
@@ -61,7 +110,9 @@ int esp32_serial_bin_tx(void *ctx, uint8_t *payload, int len) {
     
     serial_ctx_t *sctx = (serial_ctx_t *)ctx;
     
-    LOG_HEX(TAG, "TX Decoded:", payload, len);
+    //LOG_HEX(TAG, "TX Decoded:", payload, len);
+    uint8_t mtype = get_jmp_msg_type(payload, len);
+    ESP_LOGI(TAG, "TX Message Type: %s", jmp_msg_type_to_str(mtype));
 
     // COB encode payload and send
     uint8_t encoded_data[cob_encoded_max_size(len)];
@@ -72,7 +123,7 @@ int esp32_serial_bin_tx(void *ctx, uint8_t *payload, int len) {
         return -1;
     }
 
-    LOG_HEX(TAG, "TX Encoded:", encoded_data, encoded_size);
+    //LOG_HEX(TAG, "TX Encoded:", encoded_data, encoded_size);
 
     int bytes_written = uart_write_bytes(sctx->uart_port, (const char *)encoded_data, encoded_size);
     //ESP_LOGI(TAG, "\nuart written bytes: %d\n", bytes_written);
@@ -125,14 +176,16 @@ void serial_task(void *pvParameters) {
                 // Frame delimiter found
                 if (encoded_data[i] == 0x00) {
 
-                    LOG_HEX(TAG, "RX Encoded:", acc, acc_idx);
+                    //LOG_HEX(TAG, "RX Encoded:", acc, acc_idx);
 
                     uint8_t decoded_data[cob_decoded_max_size(acc_idx)];
                     size_t decoded_size = 0;
                     cob_result_t result = cob_decode(acc, acc_idx, decoded_data, sizeof(decoded_data), &decoded_size);
                     
                     if (result == COB_OK && decoded_size > 0) {
-                        LOG_HEX(TAG, "RX Decoded:", decoded_data, decoded_size);
+                        //LOG_HEX(TAG, "RX Decoded:", decoded_data, decoded_size);
+                        uint8_t rmtype = get_jmp_msg_type(decoded_data, decoded_size);
+                        ESP_LOGI(TAG, "RX Message Type: %s", jmp_msg_type_to_str(rmtype));
 
 
                         queue_pkt_t pkt = {
