@@ -8,7 +8,6 @@
 
 #include "ucore/ucore.h"
 #include "ucore/jmp_bin.h"
-#include "ucore/mpy_bindings.h"
 
 QueueHandle_t stdin_queue;
 QueueHandle_t ucore_queue;
@@ -356,6 +355,232 @@ char *ucore_raw_input(const char *prompt){
 
 }
 
+// ---- Reply helper ----
+// Consolidates the repeated pattern of: alloc → build header → copy parent header → copy content → prefix → send → free
+int ucore_send_reply(request_context_t *req_ctx, uint8_t msg_type,
+                     const uint8_t *content, size_t content_len) {
+
+    size_t header_len = 0, offset = 0;
+    size_t max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN +
+                     sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN +
+                     req_ctx->msg->header_len + content_len;
+
+    uint8_t *payload = malloc(max_len);
+    if (!payload) {
+        return -1;
+    }
+
+    char uuid[UCORE_MAX_ID_LEN];
+    jmp_header_t header = {
+        .msg_id_len = (uint16_t)ucore_uuid(uuid),
+        .msg_id = (uint8_t*)uuid,
+        .session_id_len = req_ctx->header->session_id_len,
+        .session_id = req_ctx->header->session_id,
+        .username_len = 0,
+        .username = NULL,
+        .msg_type = msg_type,
+        .version = UCORE_KERNEL_JMP_VERSION,
+    };
+
+    offset += UCORE_SANS_PREFIX_LEN;
+    offset += JMP_MSG_PREFIX_LEN;
+    jmp_serialize_header(payload + offset, max_len - offset, &header, &header_len);
+    offset += header_len;
+
+    memcpy(payload + offset, req_ctx->msg->header, req_ctx->msg->header_len);
+    offset += req_ctx->msg->header_len;
+
+    if (content && content_len > 0) {
+        memcpy(payload + offset, content, content_len);
+        offset += content_len;
+    }
+
+    jmp_add_msg_prefix(payload + UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN,
+                       header_len, req_ctx->msg->header_len, 0, content_len, 0);
+    memcpy(payload, req_ctx->payload, UCORE_SANS_PREFIX_LEN);
+
+    int ret = kcontext.transport.bin_tx(kcontext.transport_ctx, payload, offset);
+    free(payload);
+    return ret;
+}
+
+// ---- JMP Message Handlers (handled directly by ucore_task) ----
+
+static void handle_kernel_info(request_context_t *req_ctx) {
+    iopub_status(KERNEL_BUSY);
+
+    jmp_kernel_info_reply_t info_rep = {
+        .status = STATUS_OK,
+        .protocol_version = UCORE_KERNEL_JMP_VERSION,
+
+        .implementation_len = UCORE_KERNEL_IMPLEMENTATION_LEN,
+        .implementation = (uint8_t *)UCORE_KERNEL_IMPLEMENTATION,
+        .implementation_version = UCORE_KERNEL_IMPLEMENATION_VERSION,
+
+        .lang_name_len = UCORE_KERNEL_LANGUAGE_NAME_LEN,
+        .lang_name = (uint8_t *)UCORE_KERNEL_LANGUAGE_NAME,
+        .lang_version = UCORE_MICROPYTHON_VERSION,
+
+        .mimetype_len = UCORE_KERNEL_MIMETYPE_LEN,
+        .mimetype = (uint8_t *)UCORE_KERNEL_MIMETYPE,
+
+        .file_ext_len = UCORE_KERNEL_FILE_EXTENSION_LEN,
+        .file_extension = (uint8_t *)UCORE_KERNEL_FILE_EXTENSION,
+
+        .banner_len = UCORE_KERNEL_BANNER_LEN,
+        .banner = (uint8_t *)UCORE_KERNEL_BANNER,
+
+        .debugger = 0,
+    };
+
+    size_t content_len = 0;
+    size_t max_content = sizeof(jmp_kernel_info_reply_t) +
+                         info_rep.implementation_len + info_rep.lang_name_len +
+                         info_rep.mimetype_len + info_rep.file_ext_len + info_rep.banner_len;
+    uint8_t *content = malloc(max_content);
+    if (!content) {
+        return;
+    }
+
+    jmp_serialize_kernel_info_reply(content, max_content, &info_rep, &content_len);
+    ucore_send_reply(req_ctx, JMP_KERNEL_INFO_REPLY, content, content_len);
+    free(content);
+
+    iopub_status(KERNEL_IDLE);
+}
+
+static void handle_input_reply(request_context_t *req_ctx) {
+    uint8_t *input_rep = malloc(req_ctx->msg->content_len);
+    if (!input_rep) {
+        return;
+    }
+    memcpy(input_rep, req_ctx->msg->content, req_ctx->msg->content_len);
+    queue_pkt_t ipkt = {
+        .payload = (void*)input_rep,
+        .payload_len = req_ctx->msg->content_len,
+        .payload_tag = JMP_INPUT_REPLY,
+    };
+    if (xQueueSend(stdin_queue, &ipkt, pdMS_TO_TICKS(1000)) != pdPASS) {
+        free(input_rep);
+    }
+}
+
+static void handle_interrupt(request_context_t *req_ctx) {
+    iopub_status(KERNEL_BUSY);
+    //vTaskDelay(pdMS_TO_TICKS(1000)); //delay a bit to make sure busy status goes first
+
+    // use registered callback to interrupt the runtime
+    // this cannot be forwarded via queue because the runtime task may be busy executing code
+    if (kcontext.keyboard_interrupt_fn) {
+        kcontext.keyboard_interrupt_fn();
+    }
+
+    jmp_interrupt_reply_t interrupt_rep = {
+        .status = STATUS_OK,
+    };
+    size_t content_len = 0;
+    uint8_t content[sizeof(jmp_status_t)];
+    //jmp_status_t has same pack format as jmp_interrupt_reply_t
+    jmp_serialize_status(content, sizeof(content), (jmp_status_t*)&interrupt_rep, &content_len);
+    ucore_send_reply(req_ctx, JMP_KERNEL_INFO_REPLY, content, content_len);
+
+    iopub_status(KERNEL_IDLE);
+}
+
+//server control messages
+static void handle_auth_reply(request_context_t *req_ctx) {
+    uint8_t *auth_rep = malloc(req_ctx->msg->content_len);
+    if (!auth_rep) {
+        return;
+    }
+
+    memcpy(auth_rep, req_ctx->msg->content, req_ctx->msg->content_len);
+    queue_pkt_t apkt = {
+        .payload = (void*)auth_rep,
+        .payload_len = req_ctx->msg->content_len,
+        .payload_tag = JMP_AUTH_REPLY,
+    };
+    if (xQueueSend(control_queue, &apkt, pdMS_TO_TICKS(1000)) != pdPASS) {
+        free(auth_rep);
+    }
+}
+
+static void handle_comm_open(request_context_t *req_ctx) {
+    size_t out_len = 0;
+    jmp_comm_open_t comm_open; 
+    jmp_deserialize_comm_open(req_ctx->msg->content, req_ctx->msg->content_len, &comm_open, &out_len);
+    
+    for(int i = 0; i < UCORE_MAX_COMM_TASKS; i++){
+        if( kcontext.comms_tasks[i].request_type == comm_open.target_id && kcontext.comms_tasks[i].instance_active == false){
+            kcontext.comms_tasks[i].comm_open = comm_open;
+            if(comm_open.comm_id_len > UCORE_MAX_COMM_ID_NAME_LEN){
+                return;
+            }
+            kcontext.comms_tasks[i].comm_open.comm_id = malloc(comm_open.comm_id_len);
+            if (kcontext.comms_tasks[i].comm_open.comm_id) {
+                memcpy(kcontext.comms_tasks[i].comm_open.comm_id, comm_open.comm_id, comm_open.comm_id_len);
+
+                // there is opportunity to pass comm_open data field to the 
+                // task but for now jmp_bin does not support data fields for comm_open
+                TaskHandle_t task_handle = NULL;
+                BaseType_t result = xTaskCreate(
+                    kcontext.comms_tasks[i].task_function,
+                    kcontext.comms_tasks[i].task_name,
+                    configMINIMAL_STACK_SIZE*4,
+                    NULL,
+                    tskIDLE_PRIORITY + 1,
+                    &task_handle
+                );
+                if(result == pdPASS){
+                    kcontext.comms_tasks[i].instance_active = true;
+                    kcontext.comms_tasks[i].instance_handle = task_handle;
+                    kcontext.comms_tasks[i].comm_open = comm_open;
+                }
+            }
+            //TODO: jmp specifies that backend needs to send a comm_close if a comm cannot be opened
+        }
+            break;
+    
+    }
+}
+
+static void handle_comm_msg(request_context_t *req_ctx) {
+    size_t out_len = 0;
+    jmp_comm_msg_t comm_msg; 
+    jmp_deserialize_comm_msg(req_ctx->msg->content, req_ctx->msg->content_len, &comm_msg, &out_len);
+
+    for(int i = 0; i < UCORE_MAX_COMM_TASKS; i++){
+        if(kcontext.comms_tasks[i].comm_open.comm_id_len == comm_msg.comm_id_len &&
+           memcmp(kcontext.comms_tasks[i].comm_open.comm_id, comm_msg.comm_id, comm_msg.comm_id_len) == 0){
+            if(comm_msg.data > 0){
+                //filter out comm_msg.data == 0 which is reserved for exit
+                xTaskNotify(kcontext.comms_tasks[i].instance_handle, comm_msg.data, eSetValueWithOverwrite);
+            }
+            break;
+        }
+    }
+}
+
+static void handle_comm_close(request_context_t *req_ctx) {
+    size_t out_len = 0;
+    jmp_comm_close_t comm_close; 
+    jmp_deserialize_comm_close(req_ctx->msg->content, req_ctx->msg->content_len, &comm_close, &out_len);
+    for(int i = 0; i < UCORE_MAX_COMM_TASKS; i++){
+        if(kcontext.comms_tasks[i].comm_open.comm_id_len == comm_close.comm_id_len &&
+           memcmp(kcontext.comms_tasks[i].comm_open.comm_id, comm_close.comm_id, comm_close.comm_id_len) == 0){
+            kcontext.comms_tasks[i].instance_active = false;
+            free(kcontext.comms_tasks[i].comm_open.comm_id);
+            kcontext.comms_tasks[i].comm_open.comm_id = NULL;
+
+            //notification with value 0 means exit
+            xTaskNotify(kcontext.comms_tasks[i].instance_handle, 0, eSetValueWithOverwrite);
+            break;
+        }
+    }
+}
+
+// ---- Main ucore task ----
+
 void ucore_task(void *pvParameters){
     queue_pkt_t pkt = {0};
     while(xQueueReceive(ucore_queue, &pkt, portMAX_DELAY) == pdTRUE){
@@ -370,8 +595,10 @@ void ucore_task(void *pvParameters){
         size_t out_len = 0;
         jmp_deserialize_header(msg.header, msg.header_len, &req_header, &out_len);
 
-        // as soon as we know the msg_type, transfer owneship of messages that are to be outsourced
-        if(req_header.msg_type == JMP_EXECUTE_REQUEST || req_header.msg_type == JMP_SHUTDOWN_REQUEST){
+        // forward messages that need micropython runtime context to the runtime task
+        if(req_header.msg_type == JMP_EXECUTE_REQUEST || 
+           req_header.msg_type == JMP_SHUTDOWN_REQUEST ||
+           req_header.msg_type == JMP_COMPLETE_REQUEST){
             if (xQueueSend(mpyruntime_queue, &pkt, pdMS_TO_TICKS(1000)) != pdPASS) {
                 goto loop_cleanup;
             }
@@ -394,236 +621,15 @@ void ucore_task(void *pvParameters){
         kcontext.current_req = &req_ctx;
         
         switch(req_header.msg_type){
-            case JMP_KERNEL_INFO_REQUEST: {
-                iopub_status(KERNEL_BUSY);
-                jmp_kernel_info_reply_t info_rep = {
-                    .status = STATUS_OK,
-                    .protocol_version = UCORE_KERNEL_JMP_VERSION,
-                
-                    .implementation_len = UCORE_KERNEL_IMPLEMENTATION_LEN,
-                    .implementation = (uint8_t *)UCORE_KERNEL_IMPLEMENTATION,
-                    .implementation_version = UCORE_KERNEL_IMPLEMENATION_VERSION,
-                
-                    .lang_name_len = UCORE_KERNEL_LANGUAGE_NAME_LEN,
-                    .lang_name = (uint8_t *)UCORE_KERNEL_LANGUAGE_NAME,
-                    .lang_version = UCORE_MICROPYTHON_VERSION,
-                
-                    .mimetype_len = UCORE_KERNEL_MIMETYPE_LEN,
-                    .mimetype = (uint8_t *)UCORE_KERNEL_MIMETYPE,
-                
-                    .file_ext_len = UCORE_KERNEL_FILE_EXTENSION_LEN,
-                    .file_extension = (uint8_t *)UCORE_KERNEL_FILE_EXTENSION,
-                
-                    .banner_len = UCORE_KERNEL_BANNER_LEN,
-                    .banner = (uint8_t *)UCORE_KERNEL_BANNER,
-                
-                    .debugger = 0,
-                };
-                
-                size_t header_len = 0, content_len = 0, max_len = 0, offset = 0;
-                max_len = UCORE_SANS_PREFIX_LEN+ JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + msg.header_len + sizeof(jmp_kernel_info_reply_t) + 
-                                    info_rep.implementation_len + info_rep.lang_name_len + 2 * UCORE_MAX_ID_LEN +
-                                    info_rep.mimetype_len + info_rep.file_ext_len + info_rep.banner_len;
-                
-                uint8_t *payload = malloc(max_len);
-                if(!payload){
-                    goto loop_cleanup;
-                }
-            
-                char uuid[UCORE_MAX_ID_LEN];
-                jmp_header_t res_header = {
-                    .msg_id_len = (uint16_t)ucore_uuid(uuid),
-                    .msg_id = (uint8_t*)uuid,
-                    .session_id_len = req_header.session_id_len,
-                    .session_id = req_header.session_id, 
-                    .username_len = 0,
-                    .username = NULL,
-                    .msg_type = JMP_KERNEL_INFO_REPLY,
-                    .version = UCORE_KERNEL_JMP_VERSION,
-                };
-
-                offset += UCORE_SANS_PREFIX_LEN; 
-                offset +=JMP_MSG_PREFIX_LEN;
-                jmp_serialize_header(payload + offset, max_len - offset, &res_header, &header_len);
-                offset += header_len; 
-                memcpy(payload + offset, msg.header, msg.header_len);
-                offset += msg.header_len; 
-                jmp_serialize_kernel_info_reply(payload + offset, max_len - offset, &info_rep, &content_len);
-                offset += content_len; 
-                jmp_add_msg_prefix(payload + UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN, header_len, msg.header_len, 0, content_len, 0);
-                memcpy(payload, pkt.payload, UCORE_SANS_PREFIX_LEN);
-
-                
-                kcontext.transport.bin_tx(kcontext.transport_ctx, payload, offset);
-                free(payload);
-                iopub_status(KERNEL_IDLE);
-                break;
-            }
-            case JMP_INPUT_REPLY: {
-                uint8_t *input_rep = malloc(msg.content_len);
-                if(!input_rep){
-                    goto loop_cleanup;
-                }
-                memcpy(input_rep, msg.content, msg.content_len);
-                queue_pkt_t ipkt = {
-                    .payload = (void*)input_rep,
-                    .payload_len = msg.content_len,
-                    .payload_tag = JMP_INPUT_REPLY,
-                };
-                if (xQueueSend(stdin_queue, &ipkt, pdMS_TO_TICKS(1000)) != pdPASS) {
-                    //
-                }
-                break;
-            }
-            case JMP_INTERRUPT_REQUEST:{
-                iopub_status(KERNEL_BUSY);
-                vTaskDelay(pdMS_TO_TICKS(1000)); //delay a bit to make sure busy status goes first
-
-                mpyruntime_keyboard_interrupt();
-                jmp_interrupt_reply_t interrupt_rep = {
-                    .status = STATUS_OK,
-                };
-                size_t header_len = 0, content_len = 0, max_len = 0, offset = 0;
-                max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + msg.header_len + 
-                            sizeof(jmp_interrupt_reply_t) + 2 * UCORE_MAX_ID_LEN;
-                
-                uint8_t *payload = malloc(max_len);
-                if(!payload){
-                    goto loop_cleanup;
-                }
-            
-                char uuid[UCORE_MAX_ID_LEN];
-                jmp_header_t res_header = {
-                    .msg_id_len = (uint16_t)ucore_uuid(uuid),
-                    .msg_id = (uint8_t*)uuid,
-                    .session_id_len = req_header.session_id_len,
-                    .session_id = req_header.session_id, 
-                    .username_len = 0,
-                    .username = NULL,
-                    .msg_type = JMP_KERNEL_INFO_REPLY,
-                    .version = UCORE_KERNEL_JMP_VERSION,
-                };
-
-                offset += UCORE_SANS_PREFIX_LEN; 
-                offset +=JMP_MSG_PREFIX_LEN;
-                jmp_serialize_header(payload + offset, max_len - offset, &res_header, &header_len);
-                offset += header_len; 
-                memcpy(payload + offset, msg.header, msg.header_len);
-                offset += msg.header_len; 
-
-                //jmp_status_t has same pack foramt as jmp_interrupt_reply_t
-                jmp_serialize_status(payload + offset, max_len - offset, (jmp_status_t*)&interrupt_rep, &content_len);
-                offset += content_len; 
-                jmp_add_msg_prefix(payload +UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN, header_len, msg.header_len, 0, content_len, 0);
-                memcpy(payload, pkt.payload, UCORE_SANS_PREFIX_LEN);
-
-                
-                kcontext.transport.bin_tx(kcontext.transport_ctx, payload, offset);
-                free(payload);
-                iopub_status(KERNEL_IDLE);
-                break;
-
-            }
-
-            //server control messages
-            case JMP_AUTH_REPLY: {                
-                uint8_t *auth_rep = malloc(msg.content_len);
-                if(!auth_rep){
-                    goto loop_cleanup;
-                }
-
-                memcpy(auth_rep, msg.content, msg.content_len);
-                queue_pkt_t apkt = {
-                    .payload = (void*)auth_rep,
-                    .payload_len = msg.content_len,
-                    .payload_tag = JMP_AUTH_REPLY,
-                };
-                if (xQueueSend(control_queue, &apkt, pdMS_TO_TICKS(1000)) != pdPASS) {
-                    //
-                }
-                
-                break;
-            }
-
-            case JMP_COMM_OPEN:{
-                jmp_comm_open_t comm_open; 
-                jmp_deserialize_comm_open(msg.content, msg.content_len, &comm_open, &out_len);
-                
-                for(int i = 0; i < UCORE_MAX_COMM_TASKS; i++){
-                    if( kcontext.comms_tasks[i].request_type == comm_open.target_id && kcontext.comms_tasks[i].instance_active == false){
-                        kcontext.comms_tasks[i].comm_open = comm_open;
-                        if(comm_open.comm_id_len > UCORE_MAX_COMM_ID_NAME_LEN){
-                            goto loop_cleanup;
-                        }
-                        kcontext.comms_tasks[i].comm_open.comm_id = malloc(comm_open.comm_id_len);
-                        if (kcontext.comms_tasks[i].comm_open.comm_id) {
-                            memcpy(kcontext.comms_tasks[i].comm_open.comm_id, comm_open.comm_id, comm_open.comm_id_len);
-
-                            // there is opportunity to pass comm_open data field to the 
-                            // task but for now jmp_bin does not support data fields for comm_open
-                            TaskHandle_t task_handle = NULL;
-                            BaseType_t result = xTaskCreate(
-                                kcontext.comms_tasks[i].task_function,
-                                kcontext.comms_tasks[i].task_name,
-                                configMINIMAL_STACK_SIZE*4,
-                                NULL,
-                                tskIDLE_PRIORITY + 1,
-                                &task_handle
-                            );
-                            if(result == pdPASS){
-                                kcontext.comms_tasks[i].instance_active = true;
-                                kcontext.comms_tasks[i].instance_handle = task_handle;
-                                kcontext.comms_tasks[i].comm_open = comm_open;
-                            }
-                        }
-                        //TODO: jmp specifies that backend needs to send a comm_close if a comm cannot be opened
-                    }
-                        break;
-                
-                }
-                break;
-            }
-
-            case JMP_COMM_MSG:{
-                jmp_comm_msg_t comm_msg; 
-                jmp_deserialize_comm_msg(msg.content, msg.content_len, &comm_msg, &out_len);
-
-                for(int i = 0; i < UCORE_MAX_COMM_TASKS; i++){
-                    if(kcontext.comms_tasks[i].comm_open.comm_id_len == comm_msg.comm_id_len &&
-                       memcmp(kcontext.comms_tasks[i].comm_open.comm_id, comm_msg.comm_id, comm_msg.comm_id_len) == 0){
-                        if(comm_msg.data > 0){
-                            //filter out comm_msg.data == 0 which is reserved for exit
-                            xTaskNotify(kcontext.comms_tasks[i].instance_handle, comm_msg.data, eSetValueWithOverwrite);
-                        }
-                        break;
-                    }
-                }
-                break;
-            }
-
-            case JMP_COMM_CLOSE:{
-                jmp_comm_close_t comm_close; 
-                jmp_deserialize_comm_close(msg.content, msg.content_len, &comm_close, &out_len);
-                for(int i = 0; i < UCORE_MAX_COMM_TASKS; i++){
-                    if(kcontext.comms_tasks[i].comm_open.comm_id_len == comm_close.comm_id_len &&
-                       memcmp(kcontext.comms_tasks[i].comm_open.comm_id, comm_close.comm_id, comm_close.comm_id_len) == 0){
-                        kcontext.comms_tasks[i].instance_active = false;
-                        free(kcontext.comms_tasks[i].comm_open.comm_id);
-                        kcontext.comms_tasks[i].comm_open.comm_id = NULL;
-
-                        //notification with value 0 means exit
-                        xTaskNotify(kcontext.comms_tasks[i].instance_handle, 0, eSetValueWithOverwrite);
-                        break;
-                    }
-                }
-                break;
-            }
-
-            case TARGET_NOT_FOUND:{
-                break;
-            }
-            default:
-                break;
+            case JMP_KERNEL_INFO_REQUEST: handle_kernel_info(&req_ctx); break;
+            case JMP_INPUT_REPLY:         handle_input_reply(&req_ctx); break;
+            case JMP_INTERRUPT_REQUEST:   handle_interrupt(&req_ctx); break;
+            case JMP_AUTH_REPLY:          handle_auth_reply(&req_ctx); break;
+            case JMP_COMM_OPEN:           handle_comm_open(&req_ctx); break;
+            case JMP_COMM_MSG:            handle_comm_msg(&req_ctx); break;
+            case JMP_COMM_CLOSE:          handle_comm_close(&req_ctx); break;
+            case TARGET_NOT_FOUND:        break;
+            default:                      break;
         }
 
 loop_cleanup:
