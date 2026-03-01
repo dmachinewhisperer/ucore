@@ -113,6 +113,7 @@ typedef struct{
     utils_t utils; 
     transport_t transport; 
     void *transport_ctx;
+    void (*keyboard_interrupt_fn)(void);   // callback for runtime-level keyboard interrupt
 } execution_context_t;
 
 typedef enum{
@@ -145,5 +146,8 @@ int ucore_start(void *args);
 
 
 int ucore_send_async(int msg_type, uint8_t* content, int content_len);
+
+int ucore_send_reply(request_context_t *req_ctx, uint8_t msg_type,
+                     const uint8_t *content, size_t content_len);
 
 #endif // UCORE_H_
