@@ -48,8 +48,8 @@
 
 #include "py/runtime.h"    // Core runtime functions (mp_obj_t, etc.)
 #include "py/compile.h"    // For mp_compile
+#include "py/parse.h"      // For AST surgical splitting
 #include "py/lexer.h"      // For mp_lexer_new_from_str_len
-#include "py/parse.h"      // For mp_parse, MP_PARSE_FILE_INPUT
 #include "py/nlr.h"        // For nlr_push, nlr_pop, nlr_buf_t
 #include "py/objexcept.h"  // For exception handling
 #include "py/objtype.h"    // For mp_obj_is_subclass_fast
@@ -83,7 +83,7 @@
 // MicroPython runs as a task under FreeRTOS
 #define MP_TASK_PRIORITY        (ESP_TASK_PRIO_MIN + 1)
 
-static const char *TAG = "mpyruntime";
+// static const char *TAG = "mpyruntime";
 
 extern const mp_obj_type_t esp32_partition_type;
 
@@ -141,20 +141,6 @@ static bool test_qstr(mp_obj_t obj, qstr name) {
         return mp_map_lookup((mp_map_t *)&mp_builtin_module_map, MP_OBJ_NEW_QSTR(name), MP_MAP_LOOKUP) ||
                mp_map_lookup((mp_map_t *)&mp_builtin_extensible_module_map, MP_OBJ_NEW_QSTR(name), MP_MAP_LOOKUP);
     }
-}
-
-static uint16_t find_token_start(const char *str, uint16_t cursor_pos) {
-    if (cursor_pos == 0) return 0;
-    
-    uint16_t pos = cursor_pos;
-    while (pos > 0) {
-        char c = str[pos - 1];
-        if (!(unichar_isalpha(c) || unichar_isdigit(c) || c == '_' || c == '.')) {
-            break;
-        }
-        pos--;
-    }
-    return pos;
 }
 
 int mp_repl_get_completions_direct(
@@ -404,8 +390,45 @@ int readline_over_jmp(vstr_t *line, const char *prompt) {
 }
 
 //core mpy vm bindings
+static mp_obj_t ucore_last_result = MP_OBJ_NULL;
+
+static mp_obj_t ucore_repl_print(mp_obj_t obj) {
+    // Suppress None result (standard Jupyter/REPL behavior)
+    if (obj == mp_const_none) {
+        ucore_last_result = MP_OBJ_NULL;
+        return mp_const_none;
+    }
+
+    // Unconditionally log for now to debug why it's not firing
+    vstr_t vstr;
+    mp_print_t print;
+    vstr_init_print(&vstr, 32, &print);
+    mp_obj_print_helper(&print, obj, PRINT_REPR);
+    printf("DEBUG: ucore_repl_print object: %s\n", vstr_str(&vstr));
+    vstr_clear(&vstr);
+
+    ucore_last_result = obj;
+    return mp_const_none;
+}
+// Node kinds for AST surgery
+typedef enum {
+    #define DEF_RULE(rule, comp, kind, ...) PN_##rule,
+    #define DEF_RULE_NC(rule, kind, ...)
+    #include "py/grammar.h"
+    #undef DEF_RULE
+    #undef DEF_RULE_NC
+    PN_const_object,
+    #define DEF_RULE(rule, comp, kind, ...)
+    #define DEF_RULE_NC(rule, kind, ...) PN_##rule,
+    #include "py/grammar.h"
+    #undef DEF_RULE
+    #undef DEF_RULE_NC
+} pn_kind_t;
+
+static MP_DEFINE_CONST_FUN_OBJ_1(ucore_repl_print_obj, ucore_repl_print);
 
 int execute_str(const char *source, int len, jmp_error_t *err) {
+    printf("DEBUG: execute_str source='%.*s' (len=%d)\n", len, source, len);
     memset(err, 0, sizeof(jmp_error_t));
     
     mp_lexer_t *lex = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, source, len, 0);
@@ -430,10 +453,90 @@ int execute_str(const char *source, int len, jmp_error_t *err) {
     nlr_buf_t nlr;
     if (nlr_push(&nlr) == 0) {
         // Success path - execute the code
+        // ucore_last_result is NULL after execution
+        ucore_last_result = MP_OBJ_NULL;
+        mp_store_global(MP_QSTR___repl_print__, MP_OBJ_FROM_PTR(&ucore_repl_print_obj));
+        
+        // === Strategy: AST-guided source splitting ===
+        // 1. Parse as FILE_INPUT to validate and find the last statement's source line
+        // 2. Free the parse tree
+        // 3. Re-parse preamble as FILE_INPUT (no REPL), execute
+        // 4. Re-parse last statement as SINGLE_INPUT (with REPL), execute
+        //
+        // We MUST re-parse the last statement as SINGLE_INPUT because FILE_INPUT
+        // mode folds away expr_stmt nodes, preventing __repl_print__ from firing.
+        
         mp_parse_tree_t parse_tree = mp_parse(lex, MP_PARSE_FILE_INPUT);
-        mp_obj_t module_fun = mp_compile(&parse_tree, lex->source_name, false);
-        mp_call_function_0(module_fun);
-        mp_handle_pending(true);
+        mp_parse_node_t root = parse_tree.root;
+
+        // Determine if there are multiple statements and find the last one's line
+        bool has_preamble = false;
+        size_t last_stmt_line = 0;
+
+        if (MP_PARSE_NODE_IS_STRUCT_KIND(root, PN_file_input_2)) {
+            mp_parse_node_t *nodes = NULL;
+            size_t n_nodes = mp_parse_node_extract_list(&root, PN_file_input_2, &nodes);
+            
+            // Count non-NEWLINE nodes and track the last one's source line
+            int non_nl_count = 0;
+            for (size_t j = 0; j < n_nodes; j++) {
+                if (!MP_PARSE_NODE_IS_TOKEN_KIND(nodes[j], MP_TOKEN_NEWLINE)) {
+                    non_nl_count++;
+                    if (MP_PARSE_NODE_IS_STRUCT(nodes[j])) {
+                        last_stmt_line = ((mp_parse_node_struct_t*)nodes[j])->source_line;
+                    }
+                }
+            }
+            has_preamble = (non_nl_count >= 2 && last_stmt_line > 1);
+            printf("DEBUG: file_input_2: %d non-NL nodes, last_stmt_line=%d, has_preamble=%d\n",
+                   non_nl_count, (int)last_stmt_line, (int)has_preamble);
+        } else {
+            printf("DEBUG: single statement (no file_input_2)\n");
+        }
+
+        // Free the FILE_INPUT parse tree - we'll re-parse from source
+        mp_parse_tree_clear(&parse_tree);
+
+        if (!has_preamble) {
+            // Single statement (or couldn't split): parse entire source as SINGLE_INPUT
+            printf("DEBUG: Parsing entire source as SINGLE_INPUT\n");
+            mp_lexer_t *lex2 = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, source, len, 0);
+            mp_parse_tree_t pt = mp_parse(lex2, MP_PARSE_SINGLE_INPUT);
+            mp_obj_t fun = mp_compile(&pt, MP_QSTR__lt_stdin_gt_, true);
+            mp_call_function_0(fun);
+            mp_handle_pending(true);
+        } else {
+            // Find byte offset where the last statement begins
+            const char *p = source;
+            size_t cur_line = 1;
+            while (cur_line < last_stmt_line && p < source + len) {
+                if (*p == '\n') cur_line++;
+                p++;
+            }
+            size_t preamble_len = p - source;
+            const char *last_src = p;
+            size_t last_len = len - preamble_len;
+
+            printf("DEBUG: Splitting at line %d (preamble=%d bytes, last=%d bytes)\n",
+                   (int)last_stmt_line, (int)preamble_len, (int)last_len);
+
+            // Execute preamble as FILE_INPUT (no REPL behavior)
+            if (preamble_len > 0) {
+                mp_lexer_t *lex_pre = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, source, preamble_len, 0);
+                mp_parse_tree_t pt_pre = mp_parse(lex_pre, MP_PARSE_FILE_INPUT);
+                mp_obj_t fun_pre = mp_compile(&pt_pre, MP_QSTR__lt_stdin_gt_, false);
+                mp_call_function_0(fun_pre);
+                mp_handle_pending(true);
+            }
+
+            // Execute last statement as SINGLE_INPUT (triggers __repl_print__ for expressions)
+            mp_lexer_t *lex_last = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, last_src, last_len, 0);
+            mp_parse_tree_t pt_last = mp_parse(lex_last, MP_PARSE_SINGLE_INPUT);
+            mp_obj_t fun_last = mp_compile(&pt_last, MP_QSTR__lt_stdin_gt_, true);
+            mp_call_function_0(fun_last);
+            mp_handle_pending(true);
+        }
+
         nlr_pop();
         gc_collect();
         
@@ -571,6 +674,184 @@ void mpyruntime_keyboard_interrupt(){
     mp_sched_keyboard_interrupt();
 }
 
+// ---- JMP Message Handlers (run on mp_task, need micropython runtime context) ----
+
+// Returns true if a soft reset is needed
+static bool handle_execute_request(request_context_t *req_ctx) {
+
+    //uint8_t *payload = NULL; 
+    int exit_code = 0;
+    size_t out_len;
+    jmp_execute_request_t execute_req;
+    jmp_deserialize_execute_request(req_ctx->msg->content, req_ctx->msg->content_len, &execute_req, &out_len);
+
+    //if code lenght is zero, frontend expects kernel to not execute 
+    //anything but instead send the curernt execution count. 
+    //note that error init needs to be before the goto so that error is defined
+    jmp_error_t error = {0};
+
+    if(execute_req.code_len == 0){
+        exit_code = 0;
+        goto response;
+    }
+
+    exit_code = execute_str((const char*)execute_req.code, execute_req.code_len, &error); 
+    kcontext.execution_count++;
+
+    // Dispatch execute_result if we have a captured object
+    printf("DEBUG: Finishing execution, exit_code=%d, ucore_last_result=%p\n", exit_code, (void*)ucore_last_result);
+    if (exit_code == __PYEXEC_SUCCESS && ucore_last_result != MP_OBJ_NULL) {
+        printf("DEBUG: Attempting to send execute_result message\n");
+        vstr_t vstr;
+        mp_print_t print;
+        vstr_init_print(&vstr, 64, &print);
+        mp_obj_print_helper(&print, ucore_last_result, PRINT_REPR);
+
+        jmp_execute_result_t result = {
+            .execution_count = kcontext.execution_count,
+            .data_count = 1,
+            .metadata_count = 0
+        };
+        
+        uint16_t key_len = 10;
+        uint8_t *key = (uint8_t*)"text/plain";
+        uint16_t val_len = vstr.len;
+        uint8_t *val = (uint8_t*)vstr.buf;
+        
+        result.data_keys_len = &key_len;
+        result.data_keys = &key;
+        result.data_values_len = &val_len;
+        result.data_values = &val;
+
+        size_t res_content_len = 0;
+        size_t res_max_len = sizeof(jmp_execute_result_t) + key_len + val_len + 32;
+
+        uint8_t *res_content = malloc(res_max_len);
+        if (res_content) {
+            jmp_serialize_execute_result(res_content, res_max_len, &result, &res_content_len);
+            ucore_send_reply(req_ctx, JMP_EXECUTE_RESULT, res_content, res_content_len);
+            free(res_content);
+        }
+        vstr_clear(&vstr);
+    }
+    
+response:;
+    size_t content_len = 0;
+
+    if(exit_code == 0){
+        jmp_execute_reply_t execute_rep = {
+            .status = STATUS_OK,
+            .execution_count = kcontext.execution_count,
+        };
+        uint8_t content[sizeof(jmp_execute_reply_t)];
+        jmp_serialize_execute_reply(content, sizeof(content), &execute_rep, &content_len);
+        ucore_send_reply(req_ctx, JMP_EXECUTE_REPLY, content, content_len);
+    } 
+    else{
+        error.execution_count = kcontext.execution_count;
+        size_t err_max = sizeof(jmp_error_t) + error.ename_len + error.evalue_len + error.traceback_len;
+        uint8_t *err_content = malloc(err_max);
+        if(!err_content){
+            // malloc failure is fatal, it means we are out 
+            // of heap and cannot make new packets so reset the runtime
+            goto execute_req_cleanup_fatal;
+        }
+        int ret = jmp_serialize_error(err_content, err_max, &error, &content_len);
+        printf("jmp_serialize_error return code: %d", ret);
+
+        //websocket_bin_tx(websock, payload, offset);   
+        ucore_send_reply(req_ctx, JMP_EXECUTE_REPLY, err_content, content_len);
+
+        //in the case of error , we need to form another message that is sent to IoPub. 
+        // this message is of type JMP_ERROR and has the same content as status=error messages. 
+        ucore_send_reply(req_ctx, JMP_ERROR, err_content, content_len);
+        free(err_content);
+    }
+
+execute_req_cleanup_fatal:
+    if(error.status > 0){
+        free(error.ename);
+        free(error.evalue);
+        free(error.traceback);
+    }
+
+    if (exit_code & PYEXEC_FORCED_EXIT) {
+        return true;
+    }
+    return false;
+}
+
+// Returns true (always triggers soft reset)
+static bool handle_shutdown_request(request_context_t *req_ctx) {
+    size_t out_len;
+    jmp_shutdown_request_t shutdown_req;
+    jmp_deserialize_shutdown_request(req_ctx->msg->content, req_ctx->msg->content_len, &shutdown_req, &out_len);
+
+    jmp_shutdown_reply_t shutdown_rep = {
+        .status = STATUS_OK,
+        .restart = 1,
+    };
+    size_t content_len = 0;
+    uint8_t content[sizeof(jmp_shutdown_reply_t)];
+    jmp_serialize_shutdown_reply(content, sizeof(content), &shutdown_rep, &content_len);
+    //websocket_bin_tx(websock, payload, offset);
+    ucore_send_reply(req_ctx, JMP_SHUTDOWN_REPLY, content, content_len);
+
+    //TODO: find out if the jmp standard specifies 
+    //if kernel state must necessarily be cleared upon restart
+    kcontext.execution_count = 0; 
+
+    //restart the kernel
+    return true;
+}
+
+// Returns true if soft reset needed (on malloc failure)
+static bool handle_complete_request_msg(request_context_t *req_ctx) {
+    size_t out_len;
+    jmp_complete_request_t complete_req;
+    jmp_deserialize_complete_request(req_ctx->msg->content, req_ctx->msg->content_len, &complete_req, &out_len);
+
+    jmp_complete_reply_t complete_rep = {0};
+    int ret = handle_complete_request(&complete_req, &complete_rep);
+    //TODO: should really make the return codes uniform accross modules and files
+    bool do_soft_reset = false;
+    if (ret != BINRPC_OK) {
+        goto complete_req_cleanup;
+    }
+
+    size_t total_match_string_len = 0;
+    for (int i = 0; i < complete_rep.matches_count; ++i) {
+        total_match_string_len += complete_rep.matches_len[i];
+    }
+
+    size_t content_len = 0;
+    size_t content_max = sizeof(uint16_t) * (complete_rep.matches_count + 1) +
+                         total_match_string_len + 32;
+
+    uint8_t *content = malloc(content_max);
+    if (!content) {
+        do_soft_reset = true;
+        goto complete_req_cleanup;
+    }
+
+    jmp_serialize_complete_reply(content, content_max, &complete_rep, &content_len);
+    ucore_send_reply(req_ctx, JMP_COMPLETE_REPLY, content, content_len);
+    free(content);
+
+complete_req_cleanup:
+    for (int i = 0; i < complete_rep.matches_count; ++i) {
+        if (complete_rep.matches && complete_rep.matches[i]) {
+            free(complete_rep.matches[i]);
+        }
+    }
+    free(complete_rep.matches);
+    free(complete_rep.matches_len);
+
+    return do_soft_reset;
+}
+
+// ---- MicroPython runtime task ----
+
 void mp_task(void *pvParameter) {
     volatile uint32_t sp = (uint32_t)esp_cpu_get_sp();
     #if MICROPY_PY_THREAD
@@ -643,251 +924,17 @@ soft_reset:
             iopub_status(KERNEL_BUSY);
           
             switch(req_header.msg_type){
-
-                case JMP_EXECUTE_REQUEST: {
-
-                    //uint8_t *payload = NULL; 
-                    int exit_code = 0;
-                    jmp_execute_request_t execute_req;
-                    jmp_deserialize_execute_request(msg.content, msg.content_len, &execute_req, &out_len);
-
-                    //if code lenght is zero, frontend expects kernel to not execute 
-                    //anything but instead send the curernt execution count. 
-                    //note that error init needs to be before the goto so that error is defined
-                    jmp_error_t error = {0};
-
-                    if(execute_req.code_len == 0){
-                        exit_code = 0;
-                        goto response;
-                    }
-
-                    exit_code = execute_str((const char*)execute_req.code, execute_req.code_len, &error); 
-                    kcontext.execution_count++;
-                    
-                response:
-                    size_t header_len = 0, content_len = 0, max_len = 0, offset = 0; 
-                    if(exit_code == 0) { //buf_len = header + parent_header + content (reply or error)
-                        max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN + 
-                                    msg.header_len + sizeof(jmp_execute_reply_t);
-                    } else{
-                        max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN + 
-                                    msg.header_len + sizeof(jmp_error_t) + error.ename_len + error.evalue_len + error.traceback_len;
-                    }
-
-                    // malloc failure is fatal, it means we are out 
-                    // of heap and cannot make new packets so reset the runtime
-                    uint8_t *payload = malloc(max_len);
-                    if(!payload){
-                        do_soft_reset = true;
-                        goto execute_req_cleanup;
-                    }
-
-                    char uuid[UCORE_MAX_ID_LEN];
-                    jmp_header_t res_header = {
-                        .msg_id_len = (uint16_t)ucore_uuid(uuid),
-                        .msg_id = (uint8_t*)uuid,
-                        .session_id_len = req_header.session_id_len,
-                        .session_id = req_header.session_id, 
-                        .username_len = 0,
-                        .username = NULL,
-                        .msg_type = JMP_EXECUTE_REPLY,
-                        .version = UCORE_KERNEL_JMP_VERSION
-                    };
-                    offset += UCORE_SANS_PREFIX_LEN; 
-                    offset += JMP_MSG_PREFIX_LEN;
-                    jmp_serialize_header(payload + offset, max_len - offset, &res_header, &header_len);
-                    offset += header_len; 
-                    
-                    //append the parent header
-                    memcpy(payload + offset, msg.header, msg.header_len);
-                    offset += msg.header_len;
-                    if(exit_code == 0){
-                        jmp_execute_reply_t execute_rep = {
-                            .status = STATUS_OK,
-                            .execution_count = kcontext.execution_count,
-                        };
-                        jmp_serialize_execute_reply(payload + offset, max_len - offset, &execute_rep, &content_len);
-                    } 
-                    else{
-                        error.execution_count = kcontext.execution_count;
-                        int ret = jmp_serialize_error(payload + offset, max_len - offset, &error, &content_len);
-                        printf("jmp_serialize_error return code: %d", ret);
-                    }
-                    offset += content_len; 
-                    jmp_add_msg_prefix(payload + UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN, header_len, msg.header_len, 0, content_len, 0);
-                    memcpy(payload, pkt.payload, UCORE_SANS_PREFIX_LEN);
-                    //websocket_bin_tx(websock, payload, offset);   
-                    kcontext.transport.bin_tx(kcontext.transport_ctx, payload, offset); 
-
-                    //in the case of error , we need to form another message that is sent to IoPub. 
-                    // this message is of type JMP_ERROR and has the same content as status=error messages. 
-                    // Note that we only need to drop in error header into the already formatted  payload
-                    if(exit_code != 0){
-                        jmp_header_t error_header = {
-                            .msg_id_len = (uint16_t)ucore_uuid(uuid),
-                            .msg_id = (uint8_t*)uuid,
-                            .session_id_len = req_header.session_id_len,
-                            .session_id = req_header.session_id, 
-                            .username_len = 0,
-                            .username = NULL,
-                            .msg_type = JMP_ERROR,
-                            .version = UCORE_KERNEL_JMP_VERSION
-                        };
-                        
-                        header_len = 0;
-                        int payload_len = offset; 
-                        offset = 0;
-                        offset += UCORE_SANS_PREFIX_LEN; 
-                        offset += JMP_MSG_PREFIX_LEN;
-                        jmp_serialize_header(payload + offset, max_len - offset, &error_header, &header_len);
-
-                        kcontext.transport.bin_tx(kcontext.transport_ctx, payload, payload_len); 
-                    }
-
-                
-                execute_req_cleanup:
-                    if(error.status > 0){
-                        free(error.ename);
-                        free(error.evalue);
-                        free(error.traceback);
-                    }
-                    
-                    free(payload);
-
-                    if (exit_code & PYEXEC_FORCED_EXIT) {
-                        do_soft_reset = true;
-                    }
-
+                case JMP_EXECUTE_REQUEST:
+                    do_soft_reset = handle_execute_request(&req_ctx);
                     break;
-                }
-                case JMP_SHUTDOWN_REQUEST: {
-                    jmp_shutdown_request_t shutdown_req;
-                    jmp_deserialize_shutdown_request(msg.content, msg.content_len, &shutdown_req, &out_len);
-
-                    jmp_shutdown_reply_t shutdown_rep = {
-                        .status = STATUS_OK,
-                        .restart = 1,
-                    };
-                    size_t header_len = 0, content_len = 0, max_len = 0, offset = 0;
-                    max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN +
-                                    msg.header_len + sizeof(jmp_shutdown_reply_t);
-
-                    uint8_t *payload = malloc(max_len);
-                    if(!payload){
-                        do_soft_reset = true;
-                        goto shutdown_req_cleanup;
-                    }
-                
-                    char uuid[UCORE_MAX_ID_LEN];
-                    jmp_header_t res_header = {
-                        .msg_id_len = (uint16_t)ucore_uuid(uuid),
-                        .msg_id = (uint8_t*)uuid,
-                        .session_id_len = req_header.session_id_len,
-                        .session_id = req_header.session_id, 
-                        .username_len = 0,
-                        .username = NULL,
-                        .msg_type = JMP_SHUTDOWN_REPLY,
-                        .version = UCORE_KERNEL_JMP_VERSION,
-                    };
-                    offset += UCORE_SANS_PREFIX_LEN; 
-                    offset += JMP_MSG_PREFIX_LEN;
-                    jmp_serialize_header(payload + offset, max_len - offset, &res_header, &header_len);
-                    offset += header_len; 
-                    memcpy(payload + offset, msg.header, msg.header_len);
-                    offset += msg.header_len;
-                    jmp_serialize_shutdown_reply(payload + offset, max_len - offset, &shutdown_rep, &content_len);
-                    offset += content_len;
-
-                    jmp_add_msg_prefix(payload + UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN, header_len, msg.header_len, 0, content_len, 0);
-                    memcpy(payload, pkt.payload, UCORE_SANS_PREFIX_LEN);
-                    //websocket_bin_tx(websock, payload, offset);
-                    kcontext.transport.bin_tx(kcontext.transport_ctx, payload, offset);
-
-                shutdown_req_cleanup:
-                    free(payload);
-                    //TODO: find out if the jmp standard specifies 
-                    //if kernel state must necessarily be cleared upon restart
-                    kcontext.execution_count = 0; 
-
-                    //restart the kernel
-                    do_soft_reset = true;
+                case JMP_SHUTDOWN_REQUEST:
+                    do_soft_reset = handle_shutdown_request(&req_ctx);
                     break;
-                }
-                case JMP_COMPLETE_REQUEST:{
-                    jmp_complete_request_t complete_req;
-                    jmp_deserialize_complete_request(msg.content, msg.content_len, &complete_req, &out_len);
-
-                    jmp_complete_reply_t complete_rep = {0};
-                    int ret = handle_complete_request(&complete_req, &complete_rep);
-                    //TODO: should really make the return codes uniform accross modules and files
-                    if (ret != BINRPC_OK) {
-                        goto complete_req_cleanup;
-                    }
-
-                    size_t total_match_string_len = 0;
-                    for (int i = 0; i < complete_rep.matches_count; ++i) {
-                        total_match_string_len += complete_rep.matches_len[i];
-                    }
-
-                    size_t header_len = 0, content_len = 0, max_len = 0, offset = 0;
-                    max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) +
-                            2 * UCORE_MAX_ID_LEN + msg.header_len +
-                            sizeof(uint16_t) * complete_rep.matches_count +
-                            total_match_string_len + 32;
-
-                    uint8_t *payload = malloc(max_len);
-                    if (!payload) {
-                        do_soft_reset = true;
-                        goto complete_req_cleanup;
-                    }
-
-                    char uuid[UCORE_MAX_ID_LEN];
-                    jmp_header_t res_header = {
-                        .msg_id_len = (uint16_t)ucore_uuid(uuid),
-                        .msg_id = (uint8_t *)uuid,
-                        .session_id_len = req_header.session_id_len,
-                        .session_id = req_header.session_id,
-                        .username_len = 0,
-                        .username = NULL,
-                        .msg_type = JMP_COMPLETE_REPLY,
-                        .version = UCORE_KERNEL_JMP_VERSION,
-                    };
-
-                    offset += UCORE_SANS_PREFIX_LEN;
-                    offset += JMP_MSG_PREFIX_LEN;
-
-                    jmp_serialize_header(payload + offset, max_len - offset, &res_header, &header_len);
-                    offset += header_len;
-
-                    memcpy(payload + offset, msg.header, msg.header_len);
-                    offset += msg.header_len;
-
-                    jmp_serialize_complete_reply(payload + offset, max_len - offset, &complete_rep, &content_len);
-                    offset += content_len;
-
-                    jmp_add_msg_prefix(payload + UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN,
-                                    header_len, msg.header_len, 0, content_len, 0);
-
-                    memcpy(payload, pkt.payload, UCORE_SANS_PREFIX_LEN);
-
-                    kcontext.transport.bin_tx(kcontext.transport_ctx, payload, offset);
-
-                    free(payload);
-
-                complete_req_cleanup:
-                    for (int i = 0; i < complete_rep.matches_count; ++i) {
-                        if (complete_rep.matches && complete_rep.matches[i]) {
-                            free(complete_rep.matches[i]);
-                        }
-                    }
-                    free(complete_rep.matches);
-                    free(complete_rep.matches_len);
-
-                    break;                    
-
-                }
-            default:
-                break;    
+                case JMP_COMPLETE_REQUEST:
+                    do_soft_reset = handle_complete_request_msg(&req_ctx);
+                    break;
+                default:
+                    break;    
             }
 
 //loop_cleanup:            
@@ -952,6 +999,9 @@ soft_reset_exit:
 
 void mpyruntime_start(){
     mpyruntime_queue = xQueueCreate(QUEUE_GENERIC_LEN, sizeof(queue_pkt_t));
+
+    // register the keyboard interrupt callback so ucore can trigger it without depending on mpy_bindings
+    kcontext.keyboard_interrupt_fn = mpyruntime_keyboard_interrupt;
 
     xTaskCreatePinnedToCore(mp_task, "mp_task", MICROPY_TASK_STACK_SIZE / sizeof(StackType_t), NULL, MP_TASK_PRIORITY, &mp_main_task_handle, MP_TASK_COREID);
 }
