@@ -296,13 +296,16 @@ int iopub_print(const char *text, int text_len){
 
 }
 
-
+//TODO: add checks to ensure kcontext.current_req is not NULL before dereferencing
 char *ucore_raw_input(const char *prompt){
     //send an input request and block on stdin until frontend returns something. 
 
     size_t header_len = 0,content_len=0, offset = 0, max_len = 0; 
-    max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN +
-                        sizeof(jmp_input_request_t) + strlen(prompt);
+    // max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN +
+    //                     sizeof(jmp_input_request_t) + strlen(prompt);
+    max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + 
+                     sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN + strlen(prompt) +
+                     kcontext.current_req->msg->header_len + sizeof(jmp_input_request_t);                    
     uint8_t *payload = malloc(max_len);
     if (!payload) {
         return NULL;
@@ -356,7 +359,6 @@ char *ucore_raw_input(const char *prompt){
 }
 
 // ---- Reply helper ----
-// Consolidates the repeated pattern of: alloc → build header → copy parent header → copy content → prefix → send → free
 int ucore_send_reply(request_context_t *req_ctx, uint8_t msg_type,
                      const uint8_t *content, size_t content_len) {
 
@@ -449,15 +451,15 @@ static void handle_kernel_info(request_context_t *req_ctx) {
     iopub_status(KERNEL_IDLE);
 }
 
-static void handle_input_reply(request_context_t *req_ctx) {
-    uint8_t *input_rep = malloc(req_ctx->msg->content_len);
+static void handle_input_reply(jmp_message_t *msg) {
+    uint8_t *input_rep = malloc(msg->content_len);
     if (!input_rep) {
         return;
     }
-    memcpy(input_rep, req_ctx->msg->content, req_ctx->msg->content_len);
+    memcpy(input_rep, msg->content, msg->content_len);
     queue_pkt_t ipkt = {
         .payload = (void*)input_rep,
-        .payload_len = req_ctx->msg->content_len,
+        .payload_len = msg->content_len,
         .payload_tag = JMP_INPUT_REPLY,
     };
     if (xQueueSend(stdin_queue, &ipkt, pdMS_TO_TICKS(1000)) != pdPASS) {
@@ -488,16 +490,16 @@ static void handle_interrupt(request_context_t *req_ctx) {
 }
 
 //server control messages
-static void handle_auth_reply(request_context_t *req_ctx) {
-    uint8_t *auth_rep = malloc(req_ctx->msg->content_len);
+static void handle_auth_reply(jmp_message_t *msg) {
+    uint8_t *auth_rep = malloc(msg->content_len);
     if (!auth_rep) {
         return;
     }
 
-    memcpy(auth_rep, req_ctx->msg->content, req_ctx->msg->content_len);
+    memcpy(auth_rep, msg->content, msg->content_len);
     queue_pkt_t apkt = {
         .payload = (void*)auth_rep,
-        .payload_len = req_ctx->msg->content_len,
+        .payload_len = msg->content_len,
         .payload_tag = JMP_AUTH_REPLY,
     };
     if (xQueueSend(control_queue, &apkt, pdMS_TO_TICKS(1000)) != pdPASS) {
@@ -605,6 +607,23 @@ void ucore_task(void *pvParameters){
             continue;
         }
 
+        // pass-through messages: forward to internal queues without touching kcontext.current_req
+        // these may arrive while mp_task is actively using kcontext.current_req (e.g., during input())
+        // overwriting or NULLing it would break iopub delivery for the in-progress execution
+        if(req_header.msg_type == JMP_INPUT_REPLY){
+            handle_input_reply(&msg);
+            free(pkt.payload);
+            pkt.payload = NULL;
+            continue;
+        }
+
+        if(req_header.msg_type == JMP_AUTH_REPLY){
+            handle_auth_reply(&msg);
+            free(pkt.payload);
+            pkt.payload = NULL;
+            continue;
+        }
+
         // setting the global kcontext state must be done on the task level
         // some requests are outsourced to other tasks that service them
         // they must also set the kcontext before starting the service the requests
@@ -622,9 +641,7 @@ void ucore_task(void *pvParameters){
         
         switch(req_header.msg_type){
             case JMP_KERNEL_INFO_REQUEST: handle_kernel_info(&req_ctx); break;
-            case JMP_INPUT_REPLY:         handle_input_reply(&req_ctx); break;
             case JMP_INTERRUPT_REQUEST:   handle_interrupt(&req_ctx); break;
-            case JMP_AUTH_REPLY:          handle_auth_reply(&req_ctx); break;
             case JMP_COMM_OPEN:           handle_comm_open(&req_ctx); break;
             case JMP_COMM_MSG:            handle_comm_msg(&req_ctx); break;
             case JMP_COMM_CLOSE:          handle_comm_close(&req_ctx); break;
