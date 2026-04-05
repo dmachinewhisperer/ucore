@@ -1,7 +1,8 @@
-// Jupyter Messaging Protocol Binary Library
-// Supports conversion between JSON and binary formats
+// JMP Binary Protocol - Converter Library
+// See jmp_bin.spec.md for the wire format specification.
 
-// Message type constants
+// --- Message type constants ---
+
 const MSG_TYPES = {
   KERNEL_INFO_REQUEST: 0x01,
   KERNEL_INFO_REPLY: 0x02,
@@ -27,805 +28,775 @@ const MSG_TYPES = {
   COMM_MSG: 0x16,
   COMM_CLOSE: 0x17,
 
-  //control messages
   AUTH_REQUEST: 0x64,
   AUTH_REPLY: 0x65,
   TARGET_NOT_FOUND: 0x66,
 };
 
-// Reverse mapping for binary to JSON conversion
 const MSG_TYPE_NAMES = Object.fromEntries(
   Object.entries(MSG_TYPES).map(([name, value]) => [value, name.toLowerCase()])
 );
 
-// Status constants
-const STATUS = {
-  OK: 0,
-  ERROR: 1,
-  ABORT: 2
-};
-
+const STATUS = { OK: 0, ERROR: 1, ABORT: 2 };
 const STATUS_NAMES = ['ok', 'error', 'abort'];
 
-// Execution state constants
-const EXECUTION_STATE = {
-  BUSY: 0,
-  IDLE: 1,
-  STARTING: 2,
-  DEAD: 3
-};
-
+const EXECUTION_STATE = { BUSY: 0, IDLE: 1, STARTING: 2, DEAD: 3 };
 const EXECUTION_STATE_NAMES = ['busy', 'idle', 'starting', 'dead'];
 
-// Utility functions for binary operations
-class BinaryUtils {
-  static writeUInt16BE(buffer, value, offset) {
-    buffer.writeUInt16BE(value, offset);
-    return offset + 2;
+const IS_COMPLETE_STATUS = { COMPLETE: 0, INCOMPLETE: 1, INVALID: 2, UNKNOWN: 3 };
+const IS_COMPLETE_STATUS_NAMES = ['complete', 'incomplete', 'invalid', 'unknown'];
+
+// --- BinaryReader / BinaryWriter ---
+
+class BinaryReader {
+  constructor(buffer) {
+    this.buf = buffer;
+    this.pos = 0;
   }
 
-  static writeUInt32BE(buffer, value, offset) {
-    buffer.writeUInt32BE(value, offset);
-    return offset + 4;
+  _check(n) {
+    if (this.pos + n > this.buf.length) {
+      throw new RangeError(
+        `Read overflow: need ${n} bytes at offset ${this.pos}, buffer length ${this.buf.length}`
+      );
+    }
   }
 
-  static writeUInt8(buffer, value, offset) {
-    buffer.writeUInt8(value, offset);
-    return offset + 1;
+  uint8() {
+    this._check(1);
+    const v = this.buf.readUInt8(this.pos);
+    this.pos += 1;
+    return v;
   }
 
-  static writeString(buffer, str, offset) {
-    const len = Buffer.byteLength(str, 'utf8');
-    offset = this.writeUInt16BE(buffer, len, offset);
-    buffer.write(str, offset, len, 'utf8');
-    return offset + len;
+  uint16() {
+    this._check(2);
+    const v = this.buf.readUInt16BE(this.pos);
+    this.pos += 2;
+    return v;
   }
 
-  static writeVersion(buffer, version, offset) {
-    const parts = version.split('.').map(Number);
-    buffer.writeUInt8(parts[0] || 0, offset);
-    buffer.writeUInt8(parts[1] || 0, offset + 1);
-    buffer.writeUInt8(parts[2] || 0, offset + 2);
-    return offset + 3;
+  uint32() {
+    this._check(4);
+    const v = this.buf.readUInt32BE(this.pos);
+    this.pos += 4;
+    return v;
   }
 
-  static readUInt16BE(buffer, offset) {
-    return { value: buffer.readUInt16BE(offset), offset: offset + 2 };
+  bytes(n) {
+    this._check(n);
+    const v = this.buf.slice(this.pos, this.pos + n);
+    this.pos += n;
+    return v;
   }
 
-  static readUInt32BE(buffer, offset) {
-    return { value: buffer.readUInt32BE(offset), offset: offset + 4 };
+  string() {
+    const len = this.uint16();
+    this._check(len);
+    const v = this.buf.toString('utf8', this.pos, this.pos + len);
+    this.pos += len;
+    return v;
   }
 
-  static readUInt8(buffer, offset) {
-    return { value: buffer.readUInt8(offset), offset: offset + 1 };
+  version() {
+    const major = this.uint8();
+    const minor = this.uint8();
+    const patch = this.uint8();
+    return `${major}.${minor}.${patch}`;
   }
 
-  static readString(buffer, offset) {
-    const { value: len, offset: newOffset } = this.readUInt16BE(buffer, offset);
-    const str = buffer.toString('utf8', newOffset, newOffset + len);
-    return { value: str, offset: newOffset + len };
+  bool() {
+    return !!this.uint8();
   }
 
-  static readVersion(buffer, offset) {
-    const major = buffer.readUInt8(offset);
-    const minor = buffer.readUInt8(offset + 1);
-    const patch = buffer.readUInt8(offset + 2);
-    return { value: `${major}.${minor}.${patch}`, offset: offset + 3 };
+  remaining() {
+    return this.buf.length - this.pos;
   }
 }
 
-// Header conversion functions
-//header type 2 is the default, see jmp_bin.specs
-class HeaderConverter {
-  static jsonToBinary(header) {
-    const msgId = header.msg_id || '';
-    const sessionId = header.session || '';
-    const username = header.username || '';
-    const msgTypeStr = header.msg_type || '';
-    const msgType = MSG_TYPES[msgTypeStr.toUpperCase()] || 0;
-    const version = header.version || '5.0.0';
-
-    const msgIdLen = Buffer.byteLength(msgId, 'utf8');
-    const sessionIdLen = Buffer.byteLength(sessionId, 'utf8');
-    const usernameLen = Buffer.byteLength(username, 'utf8');
-
-    const bufferSize =
-      2 + msgIdLen +
-      2 + sessionIdLen +
-      2 + usernameLen +
-      1 + 3;  // msg_type + version
-
-    const buffer = Buffer.alloc(bufferSize);
-    let offset = 0;
-
-    offset = BinaryUtils.writeString(buffer, msgId, offset);
-    offset = BinaryUtils.writeString(buffer, sessionId, offset);
-    offset = BinaryUtils.writeString(buffer, username, offset);
-    offset = BinaryUtils.writeUInt8(buffer, msgType, offset);
-    BinaryUtils.writeVersion(buffer, version, offset);
-
-    return buffer;
+class BinaryWriter {
+  constructor(capacity = 256) {
+    this.buf = Buffer.alloc(capacity);
+    this.pos = 0;
   }
 
-  static binaryToJson(buffer) {
-    let offset = 0;
+  _grow(needed) {
+    while (this.pos + needed > this.buf.length) {
+      const next = Buffer.alloc(this.buf.length * 2);
+      this.buf.copy(next);
+      this.buf = next;
+    }
+  }
 
-    const { value: msgId, offset: o1 } = BinaryUtils.readString(buffer, offset);
-    const { value: sessionId, offset: o2 } = BinaryUtils.readString(buffer, o1);
-    const { value: username, offset: o3 } = BinaryUtils.readString(buffer, o2);
-    const { value: msgType, offset: o4 } = BinaryUtils.readUInt8(buffer, o3);
-    const { value: version } = BinaryUtils.readVersion(buffer, o4);
+  uint8(v) {
+    this._grow(1);
+    this.buf.writeUInt8(v, this.pos);
+    this.pos += 1;
+    return this;
+  }
 
+  uint16(v) {
+    this._grow(2);
+    this.buf.writeUInt16BE(v, this.pos);
+    this.pos += 2;
+    return this;
+  }
+
+  uint32(v) {
+    this._grow(4);
+    this.buf.writeUInt32BE(v, this.pos);
+    this.pos += 4;
+    return this;
+  }
+
+  bytes(buf) {
+    this._grow(buf.length);
+    buf.copy(this.buf, this.pos);
+    this.pos += buf.length;
+    return this;
+  }
+
+  string(s) {
+    const len = Buffer.byteLength(s, 'utf8');
+    this.uint16(len);
+    this._grow(len);
+    this.buf.write(s, this.pos, len, 'utf8');
+    this.pos += len;
+    return this;
+  }
+
+  version(v) {
+    const parts = v.split('.').map(Number);
+    this.uint8(parts[0] || 0);
+    this.uint8(parts[1] || 0);
+    this.uint8(parts[2] || 0);
+    return this;
+  }
+
+  bool(v) {
+    return this.uint8(v ? 1 : 0);
+  }
+
+  toBuffer() {
+    return this.buf.slice(0, this.pos);
+  }
+}
+
+// --- Header ---
+
+class HeaderConverter {
+  static toBinary(header) {
+    const w = new BinaryWriter();
+    w.string(header.msg_id || '');
+    w.string(header.session || '');
+    w.string(header.username || '');
+    w.uint8(MSG_TYPES[(header.msg_type || '').toUpperCase()] || 0);
+    w.version(header.version || '5.3.0');
+    return w.toBuffer();
+  }
+
+  static fromBinary(buffer) {
+    const r = new BinaryReader(buffer);
     return {
-      msg_id: msgId,
-      session: sessionId,
-      username,
+      msg_id: r.string(),
+      session: r.string(),
+      username: r.string(),
       date: new Date().toISOString(),
-      msg_type: MSG_TYPE_NAMES[msgType] || 'unknown',
-      version
+      msg_type: MSG_TYPE_NAMES[r.uint8()] || 'unknown',
+      version: r.version(),
     };
   }
 }
 
-/*
-//header type 1 
-class HeaderConverter {
-  static jsonToBinary(header) {
-    const msgId = parseInt(header.msg_id) || 0;
-    const sessionId = parseInt(header.session) || 0;
-    const username = header.username || '';
-    const msgTypeStr = header.msg_type || '';
-    const msgType = MSG_TYPES[msgTypeStr.toUpperCase()] || 0;
-    const version = header.version || '5.0.0';
+// --- Content converters ---
+// Each has static toBinary(content) -> Buffer and fromBinary(buffer) -> object.
 
-    const usernameLen = Buffer.byteLength(username, 'utf8');
-    const bufferSize = 4 + 4 + 2 + usernameLen + 1 + 3;
-    const buffer = Buffer.alloc(bufferSize);
+class KernelInfoRequestConverter {
+  static toBinary() { return Buffer.alloc(0); }
+  static fromBinary() { return {}; }
+}
 
-    let offset = 0;
-    offset = BinaryUtils.writeUInt32BE(buffer, msgId, offset);
-    offset = BinaryUtils.writeUInt32BE(buffer, sessionId, offset);
-    offset = BinaryUtils.writeString(buffer, username, offset);
-    offset = BinaryUtils.writeUInt8(buffer, msgType, offset);
-    BinaryUtils.writeVersion(buffer, version, offset);
-
-    return buffer;
+class KernelInfoReplyConverter {
+  static toBinary(c) {
+    if (c.status !== 'ok') return ErrorConverter.toBinary(c);
+    const w = new BinaryWriter();
+    w.uint8(STATUS.OK);
+    w.version(c.protocol_version || '5.3.0');
+    w.string(c.implementation || '');
+    w.version(c.implementation_version || '1.0.0');
+    w.string(c.language_info?.name || '');
+    w.version(c.language_info?.version || '0.0.0');
+    w.string(c.language_info?.mimetype || '');
+    w.string(c.language_info?.file_extension || '');
+    w.string(c.banner || '');
+    w.bool(c.debugger);
+    return w.toBuffer();
   }
 
-  static binaryToJson(buffer) {
-    let offset = 0;
-    const { value: msgId, offset: o1 } = BinaryUtils.readUInt32BE(buffer, offset);
-    const { value: sessionId, offset: o2 } = BinaryUtils.readUInt32BE(buffer, o1);
-    const { value: username, offset: o3 } = BinaryUtils.readString(buffer, o2);
-    const { value: msgType, offset: o4 } = BinaryUtils.readUInt8(buffer, o3);
-    const { value: version } = BinaryUtils.readVersion(buffer, o4);
-
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const status = r.uint8();
+    if (status !== STATUS.OK) return ErrorConverter.fromBinary(buf);
     return {
-      msg_id: msgId.toString(),
-      session: sessionId.toString(),
-      username,
-      date: new Date().toISOString(),
-      msg_type: MSG_TYPE_NAMES[msgType] || 'unknown',
-      version
+      status: 'ok',
+      protocol_version: r.version(),
+      implementation: r.string(),
+      implementation_version: r.version(),
+      language_info: {
+        name: r.string(),
+        version: r.version(),
+        mimetype: r.string(),
+        file_extension: r.string(),
+      },
+      banner: r.string(),
+      debugger: r.bool(),
     };
   }
 }
-*/
-// Message type converters
+
 class ExecuteRequestConverter {
-  static jsonToBinary(content) {
-    const code = content.code || '';
-    const flags =
-      (content.silent ? 1 : 0) |
-      (content.store_history ? 2 : 0) |
-      (content.allow_stdin ? 4 : 0) |
-      (content.stop_on_error ? 8 : 0);
-
-    const codeLen = Buffer.byteLength(code, 'utf8');
-    const buffer = Buffer.alloc(2 + codeLen + 1);
-
-    let offset = 0;
-    offset = BinaryUtils.writeString(buffer, code, offset);
-    BinaryUtils.writeUInt8(buffer, flags, offset);
-
-    return buffer;
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.code || '');
+    w.uint8(
+      (c.silent ? 1 : 0) |
+      (c.store_history ? 2 : 0) |
+      (c.allow_stdin ? 4 : 0) |
+      (c.stop_on_error ? 8 : 0)
+    );
+    return w.toBuffer();
   }
 
-  static binaryToJson(buffer) {
-    let offset = 0;
-    const { value: code, offset: o1 } = BinaryUtils.readString(buffer, offset);
-    const { value: flags } = BinaryUtils.readUInt8(buffer, o1);
-
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const code = r.string();
+    const flags = r.uint8();
     return {
       code,
       silent: !!(flags & 1),
       store_history: !!(flags & 2),
       allow_stdin: !!(flags & 4),
       stop_on_error: !!(flags & 8),
-      user_expressions: {}
+      user_expressions: {},
     };
   }
 }
 
 class ExecuteReplyConverter {
-  static jsonToBinary(content) {
-    if (content.status !== 'ok') {
-      return ErrorConverter.jsonToBinary(content);
-    }
-
-    const buffer = Buffer.alloc(3);
-    let offset = 0;
-    offset = BinaryUtils.writeUInt8(buffer, STATUS.OK, offset);
-    BinaryUtils.writeUInt16BE(buffer, content.execution_count || 0, offset);
-
-    return buffer;
+  static toBinary(c) {
+    if (c.status !== 'ok') return ErrorConverter.toBinary(c);
+    const w = new BinaryWriter();
+    w.uint8(STATUS.OK);
+    w.uint16(c.execution_count || 0);
+    return w.toBuffer();
   }
 
-  static binaryToJson(buffer) {
-    const { value: status } = BinaryUtils.readUInt8(buffer, 0);
-
-    if (status !== STATUS.OK) {
-      return ErrorConverter.binaryToJson(buffer);
-    }
-
-    const { value: executionCount } = BinaryUtils.readUInt16BE(buffer, 1);
-
-    return {
-      status: 'ok',
-      execution_count: executionCount
-    };
-  }
-}
-
-class KernelInfoRequestConverter {
-  static jsonToBinary(content) {
-    return Buffer.alloc(0);
-  }
-
-  static binaryToJson(buffer) {
-    return {};
-  }
-}
-
-class KernelInfoReplyConverter {
-  static jsonToBinary(content) {
-    if (content.status !== 'ok') {
-      return ErrorConverter.jsonToBinary(content);
-    }
-
-    const impl = content.implementation || '';
-    const langName = content.language_info?.name || '';
-    const langMimetype = content.language_info?.mimetype || '';
-    const langFileExt = content.language_info?.file_extension || '';
-    const banner = content.banner || '';
-
-    const bufferSize = 1 + 3 + 2 + Buffer.byteLength(impl, 'utf8') + 3 +
-      2 + Buffer.byteLength(langName, 'utf8') + 3 +
-      2 + Buffer.byteLength(langMimetype, 'utf8') +
-      2 + Buffer.byteLength(langFileExt, 'utf8') +
-      2 + Buffer.byteLength(banner, 'utf8') + 1;
-
-    const buffer = Buffer.alloc(bufferSize);
-    let offset = 0;
-
-    offset = BinaryUtils.writeUInt8(buffer, STATUS.OK, offset);
-    offset = BinaryUtils.writeVersion(buffer, content.protocol_version || '5.0.0', offset);
-    offset = BinaryUtils.writeString(buffer, impl, offset);
-    offset = BinaryUtils.writeVersion(buffer, content.implementation_version || '1.0.0', offset);
-    offset = BinaryUtils.writeString(buffer, langName, offset);
-    offset = BinaryUtils.writeVersion(buffer, content.language_info?.version || '1.0.0', offset);
-    offset = BinaryUtils.writeString(buffer, langMimetype, offset);
-    offset = BinaryUtils.writeString(buffer, langFileExt, offset);
-    offset = BinaryUtils.writeString(buffer, banner, offset);
-    BinaryUtils.writeUInt8(buffer, content.debugger ? 1 : 0, offset);
-
-    return buffer;
-  }
-
-  static binaryToJson(buffer) {
-    const { value: status } = BinaryUtils.readUInt8(buffer, 0);
-
-    if (status !== STATUS.OK) {
-      return ErrorConverter.binaryToJson(buffer);
-    }
-
-    let offset = 1;
-    const { value: protocolVersion, offset: o1 } = BinaryUtils.readVersion(buffer, offset);
-    const { value: implementation, offset: o2 } = BinaryUtils.readString(buffer, o1);
-    const { value: implVersion, offset: o3 } = BinaryUtils.readVersion(buffer, o2);
-    const { value: langName, offset: o4 } = BinaryUtils.readString(buffer, o3);
-    const { value: langVersion, offset: o5 } = BinaryUtils.readVersion(buffer, o4);
-    const { value: langMimetype, offset: o6 } = BinaryUtils.readString(buffer, o5);
-    const { value: langFileExt, offset: o7 } = BinaryUtils.readString(buffer, o6);
-    const { value: banner, offset: o8 } = BinaryUtils.readString(buffer, o7);
-    const { value: _debugger } = BinaryUtils.readUInt8(buffer, o8);
-
-    return {
-      status: 'ok',
-      protocol_version: protocolVersion,
-      implementation,
-      implementation_version: implVersion,
-      language_info: {
-        name: langName,
-        version: langVersion,
-        mimetype: langMimetype,
-        file_extension: langFileExt
-      },
-      banner,
-      _debugger: !!_debugger
-    };
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const status = r.uint8();
+    if (status !== STATUS.OK) return ErrorConverter.fromBinary(buf);
+    return { status: 'ok', execution_count: r.uint16() };
   }
 }
 
 class StreamConverter {
-  static jsonToBinary(content) {
-    const name = content.name === 'stderr' ? 1 : 0;  // default to stdout
-    const text = content.text || '';
-
-    const textByteLength = Buffer.byteLength(text, 'utf8');
-    const bufferSize = 1 + 2 + textByteLength; // 1 byte for name, 2 for length, rest for text
-
-    const buffer = Buffer.alloc(bufferSize);
-    let offset = 0;
-
-    buffer.writeUInt8(name, offset);  // Write the name code
-    offset += 1;
-
-    offset = BinaryUtils.writeString(buffer, text, offset); // Writes 2-byte length + UTF-8 bytes
-
-    return buffer;
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.uint8(c.name === 'stderr' ? 1 : 0);
+    w.string(c.text || '');
+    return w.toBuffer();
   }
 
-  static binaryToJson(buffer) {
-    let offset = 0;
-
-    const nameCode = buffer.readUInt8(offset);
-    const name = nameCode === 1 ? 'stderr' : 'stdout';  // Default fallback is stdout
-    offset += 1;
-
-    const { value: text } = BinaryUtils.readString(buffer, offset);
-
-    return { name, text };
-  }
-}
-
-class StatusConverter {
-  static jsonToBinary(content) {
-    const stateMap = { busy: 0, idle: 1, starting: 2 };
-    const state = stateMap[content.execution_state] || 0;
-
-    const buffer = Buffer.alloc(1);
-    BinaryUtils.writeUInt8(buffer, state, 0);
-    return buffer;
-  }
-
-  static binaryToJson(buffer) {
-    const { value: state } = BinaryUtils.readUInt8(buffer, 0);
-    return {
-      execution_state: EXECUTION_STATE_NAMES[state] || 'busy'
-    };
-  }
-}
-
-class InputRequestConverter {
-  static jsonToBinary(content) {
-    const prompt = content.prompt || '';
-    const password = content.password || false;
-
-    const bufferSize = 2 + Buffer.byteLength(prompt, 'utf8') + 1;
-    const buffer = Buffer.alloc(bufferSize);
-
-    let offset = 0;
-    offset = BinaryUtils.writeString(buffer, prompt, offset);
-    BinaryUtils.writeUInt8(buffer, password ? 1 : 0, offset);
-
-    return buffer;
-  }
-
-  static binaryToJson(buffer) {
-    let offset = 0;
-    const { value: prompt, offset: o1 } = BinaryUtils.readString(buffer, offset);
-    const { value: password } = BinaryUtils.readUInt8(buffer, o1);
-
-    return { prompt, password: !!password };
-  }
-}
-
-class InputReplyConverter {
-  static jsonToBinary(content) {
-    const value = content.value || '';
-    const buffer = Buffer.alloc(2 + Buffer.byteLength(value, 'utf8'));
-    BinaryUtils.writeString(buffer, value, 0);
-    return buffer;
-  }
-
-  static binaryToJson(buffer) {
-    const { value } = BinaryUtils.readString(buffer, 0);
-    return { value };
-  }
-}
-
-class ShutdownRequestConverter {
-  static jsonToBinary(content) {
-    const buffer = Buffer.alloc(1);
-    BinaryUtils.writeUInt8(buffer, content.restart ? 1 : 0, 0);
-    return buffer;
-  }
-
-  static binaryToJson(buffer) {
-    const { value: restart } = BinaryUtils.readUInt8(buffer, 0);
-    return { restart: !!restart };
-  }
-}
-
-class ShutdownReplyConverter {
-  static jsonToBinary(content) {
-    if (content.status !== 'ok') {
-      return ErrorConverter.jsonToBinary(content);
-    }
-
-    const buffer = Buffer.alloc(2);
-    let offset = 0;
-    offset = BinaryUtils.writeUInt8(buffer, STATUS.OK, offset);
-    BinaryUtils.writeUInt8(buffer, content.restart ? 1 : 0, offset);
-    return buffer;
-  }
-
-  static binaryToJson(buffer) {
-    const { value: status } = BinaryUtils.readUInt8(buffer, 0);
-
-    if (status !== STATUS.OK) {
-      return ErrorConverter.binaryToJson(buffer);
-    }
-
-    const { value: restart } = BinaryUtils.readUInt8(buffer, 1);
-    return { status: 'ok', restart: !!restart };
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const name = r.uint8() === 1 ? 'stderr' : 'stdout';
+    return { name, text: r.string() };
   }
 }
 
 class ErrorConverter {
-  static jsonToBinary(content) {
-    const ename = content.ename || '';
-    const evalue = content.evalue || '';
-    const traceback = Array.isArray(content.traceback) ? content.traceback.join('\n') : '';
-    const execution_count = content.execution_count || 0;
-
-    const bufferSize = 1 + 2 + Buffer.byteLength(ename, 'utf8') +
-      2 + Buffer.byteLength(evalue, 'utf8') +
-      2 + Buffer.byteLength(traceback, 'utf8') +
-      2;
-    const buffer = Buffer.alloc(bufferSize);
-
-    let offset = 0;
-    offset = BinaryUtils.writeUInt8(buffer, STATUS.ERROR, offset);
-    offset = BinaryUtils.writeString(buffer, ename, offset);
-    offset = BinaryUtils.writeString(buffer, evalue, offset);
-    offset = BinaryUtils.writeString(buffer, traceback, offset);
-    BinaryUtils.writeUInt16(buffer, execution_count, offset);
-
-    return buffer;
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.uint8(STATUS.ERROR);
+    w.string(c.ename || '');
+    w.string(c.evalue || '');
+    w.string(Array.isArray(c.traceback) ? c.traceback.join('\n') : (c.traceback || ''));
+    w.uint16(c.execution_count || 0);
+    return w.toBuffer();
   }
 
-  static binaryToJson(buffer) {
-    let offset = 0;
-    const { value: status, offset: o1 } = BinaryUtils.readUInt8(buffer, offset);
-
-    if (status === STATUS.ABORT) {
-      return { status: 'abort' };
-    }
-
-    const { value: ename, offset: o2 } = BinaryUtils.readString(buffer, o1);
-    const { value: evalue, offset: o3 } = BinaryUtils.readString(buffer, o2);
-    const { value: traceback, offset: o4 } = BinaryUtils.readString(buffer, o3);
-    const { value: execution_count } = BinaryUtils.readUInt16BE(buffer, o4);
-
-    // return {
-    //   status: 'error',
-    //   ename,
-    //   evalue,
-    //   traceback: traceback.split('\n').filter(line => line.trim()),
-    //   execution_count
-    // };
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const status = r.uint8();
+    if (status === STATUS.ABORT) return { status: 'abort' };
+    const ename = r.string();
+    const evalue = r.string();
+    const rawTraceback = r.string();
+    const execution_count = r.uint16();
+    const lines = rawTraceback.split('\n').filter(l => l.trim());
     return {
       status: 'error',
       ename,
       evalue,
-      traceback: (() => {
-        const lines = traceback
-          .split('\n')
-          .filter(line => line.trim());
-        return lines.length > 0
-          ? lines
-          : ['No traceback available.'];
-      })(),
-      execution_count
+      traceback: lines.length > 0 ? lines : [],
+      execution_count,
     };
   }
 }
 
-//other custom converters (used for control) not implemented in standard JMP
-class AuthRequestConverter {
-  static jsonToBinary(content) {
-    const deviceId = content.device_id || '';
-    const timestamp = content.timestamp >>> 0; // force to uint32
-    const hmac = content.hmac || [];
-
-    if (!Array.isArray(hmac) || hmac.length !== 32) {
-      throw new Error('auth_request.hmac must be an array of 32 bytes');
+class DisplayDataConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    const entries = Object.entries(c.data || {});
+    w.uint16(entries.length);
+    for (const [key, value] of entries) {
+      w.string(key);
+      w.string(String(value));
     }
-
-    const deviceIdLen = Buffer.byteLength(deviceId, 'utf8');
-    const bufferSize = 2 + deviceIdLen + 4 + 32;
-
-    const buffer = Buffer.alloc(bufferSize);
-    let offset = 0;
-
-    offset = BinaryUtils.writeString(buffer, deviceId, offset);
-    offset = BinaryUtils.writeUInt32BE(buffer, timestamp, offset);
-
-    for (let i = 0; i < 32; i++) {
-      buffer.writeUInt8(hmac[i] || 0, offset++);
-    }
-
-    return buffer;
+    w.uint16(0); // metadata_count
+    return w.toBuffer();
   }
 
-  static binaryToJson(buffer) {
-    let offset = 0;
-
-    const { value: device_id, offset: o1 } = BinaryUtils.readString(buffer, offset);
-    const { value: timestamp, offset: o2 } = BinaryUtils.readUInt32BE(buffer, o1);
-
-    const hmac = [];
-    for (let i = 0; i < 32; i++) {
-      hmac.push(buffer.readUInt8(o2 + i));
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const dataCount = r.uint16();
+    const data = {};
+    for (let i = 0; i < dataCount; i++) {
+      data[r.string()] = r.string();
     }
+    r.uint16(); // metadata_count
+    return { data, metadata: {} };
+  }
+}
 
+class StatusConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter(1);
+    const map = { busy: 0, idle: 1, starting: 2 };
+    w.uint8(map[c.execution_state] ?? 0);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { execution_state: EXECUTION_STATE_NAMES[r.uint8()] || 'busy' };
+  }
+}
+
+class InputRequestConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.prompt || '');
+    w.bool(c.password);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { prompt: r.string(), password: r.bool() };
+  }
+}
+
+class InputReplyConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.value || '');
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { value: r.string() };
+  }
+}
+
+class CompleteRequestConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.code || '');
+    w.uint16(c.cursor_pos || 0);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { code: r.string(), cursor_pos: r.uint16() };
+  }
+}
+
+class CompleteReplyConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    const matches = c.matches || [];
+    w.uint16(matches.length);
+    for (const m of matches) w.string(m);
+    w.uint16(c.cursor_start || 0);
+    w.uint16(c.cursor_end || 0);
+    w.uint16(0); // metadata_len
+    w.uint8(c.status === 'ok' ? STATUS.OK : STATUS.ERROR);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const count = r.uint16();
+    const matches = [];
+    for (let i = 0; i < count; i++) matches.push(r.string());
+    const cursor_start = r.uint16();
+    const cursor_end = r.uint16();
+    r.uint16(); // metadata_len
+    const status = r.uint8();
     return {
-      device_id,
-      timestamp,
-      hmac
+      matches,
+      cursor_start,
+      cursor_end,
+      metadata: {},
+      status: STATUS_NAMES[status] || 'ok',
     };
   }
 }
-class AuthReplyConverter {
-  static jsonToBinary(content) {
-    const status = content.status >>> 0;
-    const buffer = Buffer.alloc(1);
-    BinaryUtils.writeUInt8(buffer, status, 0);
-    return buffer;
+
+class InspectRequestConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.code || '');
+    w.uint16(c.cursor_pos || 0);
+    w.uint8(c.detail_level || 0);
+    return w.toBuffer();
   }
 
-  static binaryToJson(buffer) {
-    const { value: status } = BinaryUtils.readUInt8(buffer, 0);
-    return { status };
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return {
+      code: r.string(),
+      cursor_pos: r.uint16(),
+      detail_level: r.uint8(),
+    };
   }
+}
+
+class InspectReplyConverter {
+  static toBinary(c) {
+    if (c.status !== 'ok') return ErrorConverter.toBinary(c);
+    const w = new BinaryWriter();
+    w.uint8(STATUS.OK);
+    w.bool(c.found);
+    const entries = Object.entries(c.data || {});
+    w.uint16(entries.length);
+    for (const [key, value] of entries) {
+      w.string(key);
+      w.string(String(value));
+    }
+    w.uint16(0); // metadata_count
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const status = r.uint8();
+    if (status !== STATUS.OK) return ErrorConverter.fromBinary(buf);
+    const found = r.bool();
+    const dataCount = r.uint16();
+    const data = {};
+    for (let i = 0; i < dataCount; i++) {
+      data[r.string()] = r.string();
+    }
+    r.uint16(); // metadata_count
+    return { status: 'ok', found, data, metadata: {} };
+  }
+}
+
+class IsCompleteRequestConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.code || '');
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { code: r.string() };
+  }
+}
+
+class IsCompleteReplyConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    const map = { complete: 0, incomplete: 1, invalid: 2, unknown: 3 };
+    w.uint8(map[c.status] ?? 3);
+    w.string(c.indent || '');
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const status = IS_COMPLETE_STATUS_NAMES[r.uint8()] || 'unknown';
+    const indent = r.string();
+    return { status, indent };
+  }
+}
+
+class ShutdownRequestConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter(1);
+    w.bool(c.restart);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { restart: r.bool() };
+  }
+}
+
+class ShutdownReplyConverter {
+  static toBinary(c) {
+    if (c.status !== 'ok') return ErrorConverter.toBinary(c);
+    const w = new BinaryWriter(2);
+    w.uint8(STATUS.OK);
+    w.bool(c.restart);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const status = r.uint8();
+    if (status !== STATUS.OK) return ErrorConverter.fromBinary(buf);
+    return { status: 'ok', restart: r.bool() };
+  }
+}
+
+class InterruptRequestConverter {
+  static toBinary() { return Buffer.alloc(0); }
+  static fromBinary() { return {}; }
 }
 
 class ExecuteResultConverter {
-  static jsonToBinary(content) {
-    const executionCount = content.execution_count || 0;
-    const data = content.data || {};
-    const metadata = content.metadata || {};
-
-    const dataEntries = Object.entries(data);
-    const dataCount = dataEntries.length;
-
-    let bufferSize = 2 + 2; // execution_count + data_count
-
-    for (const [key, value] of dataEntries) {
-      bufferSize += 2 + Buffer.byteLength(key, 'utf8');
-      bufferSize += 2 + Buffer.byteLength(value, 'utf8');
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.uint16(c.execution_count || 0);
+    const entries = Object.entries(c.data || {});
+    w.uint16(entries.length);
+    for (const [key, value] of entries) {
+      w.string(key);
+      w.string(String(value));
     }
-
-    bufferSize += 2; // metadata_count (always 0)
-
-    const buffer = Buffer.alloc(bufferSize);
-    let offset = 0;
-
-    offset = BinaryUtils.writeUInt16BE(buffer, executionCount, offset);
-    offset = BinaryUtils.writeUInt16BE(buffer, dataCount, offset);
-
-    for (const [key, value] of dataEntries) {
-      offset = BinaryUtils.writeString(buffer, key, offset);
-      offset = BinaryUtils.writeString(buffer, value, offset);
-    }
-
-    BinaryUtils.writeUInt16BE(buffer, 0, offset); // metadata_count = 0
-
-    return buffer;
+    w.uint16(0); // metadata_count
+    return w.toBuffer();
   }
 
-  static binaryToJson(buffer) {
-    let offset = 0;
-
-    const { value: executionCount, offset: o1 } = BinaryUtils.readUInt16BE(buffer, offset);
-    const { value: dataCount, offset: o2 } = BinaryUtils.readUInt16BE(buffer, o1);
-
-    offset = o2;
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const execution_count = r.uint16();
+    const dataCount = r.uint16();
     const data = {};
-
     for (let i = 0; i < dataCount; i++) {
-      const { value: key, offset: o3 } = BinaryUtils.readString(buffer, offset);
-      const { value: value, offset: o4 } = BinaryUtils.readString(buffer, o3);
-      data[key] = value;
-      offset = o4;
+      data[r.string()] = r.string();
     }
-
-    // Read metadata_count (last 2 bytes)
-    const { value: metadataCount } = BinaryUtils.readUInt16BE(buffer, offset);
-
-    return {
-      execution_count: executionCount,
-      data,
-      metadata: {} // metadata not supported yet
-    };
+    r.uint16(); // metadata_count
+    return { execution_count, data, metadata: {} };
   }
 }
 
-// Message type converter registry
+class CommOpenConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.comm_id || '');
+    w.uint16(c.target_id ?? 0);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { comm_id: r.string(), target_id: r.uint16() };
+  }
+}
+
+class CommMsgConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.comm_id || '');
+    w.uint32(c.data ?? 0);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { comm_id: r.string(), data: r.uint32() };
+  }
+}
+
+class CommCloseConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.comm_id || '');
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { comm_id: r.string() };
+  }
+}
+
+class AuthRequestConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter();
+    w.string(c.device_id || '');
+    w.uint32(c.timestamp >>> 0);
+    const hmac = c.hmac || [];
+    if (!Array.isArray(hmac) || hmac.length !== 32) {
+      throw new Error('auth_request.hmac must be an array of 32 bytes');
+    }
+    const hmacBuf = Buffer.from(hmac);
+    w.bytes(hmacBuf);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    const device_id = r.string();
+    const timestamp = r.uint32();
+    const hmacBuf = r.bytes(32);
+    return { device_id, timestamp, hmac: Array.from(hmacBuf) };
+  }
+}
+
+class AuthReplyConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter(1);
+    w.uint8(c.status >>> 0);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { status: r.uint8() };
+  }
+}
+
+class TargetNotFoundConverter {
+  static toBinary() { return Buffer.alloc(0); }
+  static fromBinary() { return {}; }
+}
+
+// --- Converter registry ---
+
 const MESSAGE_CONVERTERS = {
-  'execute_request': ExecuteRequestConverter,
-  'execute_reply': ExecuteReplyConverter,
   'kernel_info_request': KernelInfoRequestConverter,
   'kernel_info_reply': KernelInfoReplyConverter,
+  'execute_request': ExecuteRequestConverter,
+  'execute_reply': ExecuteReplyConverter,
   'stream': StreamConverter,
+  'error': ErrorConverter,
+  'display_data': DisplayDataConverter,
   'status': StatusConverter,
   'input_request': InputRequestConverter,
   'input_reply': InputReplyConverter,
+  'complete_request': CompleteRequestConverter,
+  'complete_reply': CompleteReplyConverter,
+  'inspect_request': InspectRequestConverter,
+  'inspect_reply': InspectReplyConverter,
+  'is_complete_request': IsCompleteRequestConverter,
+  'is_complete_reply': IsCompleteReplyConverter,
   'shutdown_request': ShutdownRequestConverter,
   'shutdown_reply': ShutdownReplyConverter,
-  'error': ErrorConverter,
+  'interrupt_request': InterruptRequestConverter,
+  'execute_result': ExecuteResultConverter,
+  'comm_open': CommOpenConverter,
+  'comm_msg': CommMsgConverter,
+  'comm_close': CommCloseConverter,
   'auth_request': AuthRequestConverter,
   'auth_reply': AuthReplyConverter,
-  'execute_result': ExecuteResultConverter
+  'target_not_found': TargetNotFoundConverter,
 };
 
-// High-level conversion functions
+// --- Top-level protocol ---
+
 class JupyterMessageProtocol {
-  /**
-   * Convert a JSON message to binary format
-   * @param {Object} jsonMessage - The JSON message object
-   * @returns {Buffer} - The binary representation
-   */
   static jsonToBinary(jsonMessage) {
-    // Validate input
-    if (!jsonMessage || typeof jsonMessage !== 'object') {
-      throw new Error('Invalid JSON message: must be an object');
+    if (!jsonMessage?.header?.msg_type) {
+      throw new Error('Invalid message: header.msg_type is required');
     }
 
-    if (!jsonMessage.header || typeof jsonMessage.header !== 'object') {
-      throw new Error('Invalid JSON message: header is required and must be an object');
-    }
+    const header = HeaderConverter.toBinary(jsonMessage.header);
 
-    if (!jsonMessage.header.msg_type) {
-      throw new Error('Invalid JSON message: header.msg_type is required');
-    }
+    const ph = jsonMessage.parent_header;
+    const parentHeader = (ph && ph.msg_type)
+      ? HeaderConverter.toBinary(ph)
+      : Buffer.alloc(0);
 
-    const header = HeaderConverter.jsonToBinary(jsonMessage.header);
-    const parentHeader = jsonMessage.parent_header ?
-      HeaderConverter.jsonToBinary(jsonMessage.parent_header) : Buffer.alloc(0);
-    const metadata = Buffer.alloc(0); // unused
+    const metadata = Buffer.alloc(0);
 
     const msgType = jsonMessage.header.msg_type;
     const converter = MESSAGE_CONVERTERS[msgType];
-
     if (!converter) {
       throw new Error(`Unsupported message type: ${msgType}`);
     }
 
-    const content = converter.jsonToBinary(jsonMessage.content || {});
-    const buffers = Buffer.alloc(0); // unused
+    const content = converter.toBinary(jsonMessage.content || {});
+    const buffers = Buffer.alloc(0);
 
-    // Create the main buffer with length prefixes
-    const totalSize = 2 + 2 + 2 + 2 + 2 +
-      header.length + parentHeader.length +
-      metadata.length + content.length + buffers.length;
+    const w = new BinaryWriter(10 + header.length + parentHeader.length + content.length);
+    w.uint16(header.length);
+    w.uint16(parentHeader.length);
+    w.uint16(metadata.length);
+    w.uint16(content.length);
+    w.uint16(buffers.length);
+    w.bytes(header);
+    w.bytes(parentHeader);
+    w.bytes(content);
 
-    const buffer = Buffer.alloc(totalSize);
-    let offset = 0;
-
-    // Write length prefixes
-    offset = BinaryUtils.writeUInt16BE(buffer, header.length, offset);
-    offset = BinaryUtils.writeUInt16BE(buffer, parentHeader.length, offset);
-    offset = BinaryUtils.writeUInt16BE(buffer, metadata.length, offset);
-    offset = BinaryUtils.writeUInt16BE(buffer, content.length, offset);
-    offset = BinaryUtils.writeUInt16BE(buffer, buffers.length, offset);
-
-    // Write data sections
-    header.copy(buffer, offset);
-    offset += header.length;
-
-    if (parentHeader.length > 0) {
-      parentHeader.copy(buffer, offset);
-      offset += parentHeader.length;
-    }
-
-    if (content.length > 0) {
-      content.copy(buffer, offset);
-      offset += content.length;
-    }
-
-    return buffer;
+    return w.toBuffer();
   }
 
-  /**
-   * Convert a binary message to JSON format
-   * @param {Buffer} binaryMessage - The binary message buffer
-   * @returns {Object} - The JSON representation
-   */
   static binaryToJson(binaryMessage) {
-    let offset = 0;
+    const r = new BinaryReader(binaryMessage);
 
-    // Read length prefixes
-    const { value: headerLen, offset: o1 } = BinaryUtils.readUInt16BE(binaryMessage, offset);
-    const { value: parentHeaderLen, offset: o2 } = BinaryUtils.readUInt16BE(binaryMessage, o1);
-    const { value: metadataLen, offset: o3 } = BinaryUtils.readUInt16BE(binaryMessage, o2);
-    const { value: contentLen, offset: o4 } = BinaryUtils.readUInt16BE(binaryMessage, o3);
-    const { value: buffersLen, offset: o5 } = BinaryUtils.readUInt16BE(binaryMessage, o4);
+    const headerLen = r.uint16();
+    const parentHeaderLen = r.uint16();
+    const metadataLen = r.uint16();
+    const contentLen = r.uint16();
+    const buffersLen = r.uint16();
 
-    offset = o5;
+    const header = HeaderConverter.fromBinary(r.bytes(headerLen));
 
-    // Read header
-    const headerBuffer = binaryMessage.slice(offset, offset + headerLen);
-    const header = HeaderConverter.binaryToJson(headerBuffer);
-    offset += headerLen;
-
-    // Read parent header if present
-    let parentHeader = {};
+    let parent_header = {};
     if (parentHeaderLen > 0) {
-      const parentHeaderBuffer = binaryMessage.slice(offset, offset + parentHeaderLen);
-      parentHeader = HeaderConverter.binaryToJson(parentHeaderBuffer);
-      offset += parentHeaderLen;
+      parent_header = HeaderConverter.fromBinary(r.bytes(parentHeaderLen));
     }
 
-    // Skip metadata (unused)
-    offset += metadataLen;
+    // skip metadata
+    if (metadataLen > 0) r.bytes(metadataLen);
 
-    // Read content
     let content = {};
     if (contentLen > 0) {
-      const contentBuffer = binaryMessage.slice(offset, offset + contentLen);
+      const contentBuf = r.bytes(contentLen);
       const converter = MESSAGE_CONVERTERS[header.msg_type];
-
       if (!converter) {
         throw new Error(`Unsupported message type: ${header.msg_type}`);
       }
-
-      content = converter.binaryToJson(contentBuffer);
+      content = converter.fromBinary(contentBuf);
     }
 
-    return {
-      header,
-      parent_header: parentHeader,
-      metadata: {},
-      content,
-      buffers: []
-    };
+    return { header, parent_header, metadata: {}, content, buffers: [] };
   }
 }
 
-
-
-// Export the main class and utilities
-// module.exports = {
-//   JupyterMessageProtocol,
-//   MSG_TYPES,
-//   STATUS,
-//   EXECUTION_STATE,
-//   // Export individual converters for direct use if needed
-//   converters: MESSAGE_CONVERTERS,
-//   HeaderConverter,
-//   BinaryUtils
-// };
+// --- Exports ---
 
 export {
   JupyterMessageProtocol,
   MSG_TYPES,
+  MSG_TYPE_NAMES,
   STATUS,
+  STATUS_NAMES,
   EXECUTION_STATE,
+  EXECUTION_STATE_NAMES,
+  IS_COMPLETE_STATUS,
+  IS_COMPLETE_STATUS_NAMES,
   MESSAGE_CONVERTERS as converters,
   HeaderConverter,
-  BinaryUtils
+  BinaryReader,
+  BinaryWriter,
 };
