@@ -244,5 +244,11 @@
       "comm_id": "abc-123"
     },
     "binary": "00076162632d313233"
+  },
+  "interrupt_reply": {
+    "json": {
+      "status": "ok"
+    },
+    "binary": "00"
   }
 }
