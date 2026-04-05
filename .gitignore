@@ -3,6 +3,13 @@
 
 # Bridge (Node.js)
 bridge/node_modules/
+bridge/connection_file
+bridge/output.log
+bridge/*.ipynb
+bridge/.ipynb_checkpoints
 
 # Notes
 checkpoint.txt
+
+*.ipynb
+.ipynb_checkpoints

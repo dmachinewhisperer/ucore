@@ -8,3 +8,6 @@ devdocs
 upip
 older
 ushell
+sdkconfig
+sdkconfig.old
+components/ucore/test/test_jmp_bin
