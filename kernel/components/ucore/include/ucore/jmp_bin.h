@@ -48,12 +48,13 @@ typedef enum {
     JMP_SHUTDOWN_REQUEST       = 0x11,
     JMP_SHUTDOWN_REPLY         = 0x12,
     JMP_INTERRUPT_REQUEST      = 0x13,
-    JMP_EXECUTE_RESULT         = 0x14,
+    JMP_INTERRUPT_REPLY        = 0x14,
+    JMP_EXECUTE_RESULT         = 0x15,
 
     //comms messages
-    JMP_COMM_OPEN              = 0x15,
-    JMP_COMM_MSG               = 0x16,
-    JMP_COMM_CLOSE             = 0x17,
+    JMP_COMM_OPEN              = 0x16,
+    JMP_COMM_MSG               = 0x17,
+    JMP_COMM_CLOSE             = 0x18,
 
     //variants of comm_msg
     //JMP_COMM_NOTIFICATION_MSG  = 0x17,
@@ -232,6 +233,37 @@ typedef struct {
     // data: none
 } jmp_comm_close_t;
 
+// inspect
+typedef struct {
+    uint16_t code_len;
+    uint8_t *code;
+    uint16_t cursor_pos;
+    uint8_t detail_level;
+} jmp_inspect_request_t;
+
+typedef struct {
+    uint8_t status;        // 0 = ok
+    uint8_t found;         // boolean
+    uint16_t data_count;
+    uint16_t *data_keys_len;
+    uint8_t **data_keys;
+    uint16_t *data_values_len;
+    uint8_t **data_values;
+    uint16_t metadata_count; // always 0
+} jmp_inspect_reply_t;
+
+// is_complete
+typedef struct {
+    uint16_t code_len;
+    uint8_t *code;
+} jmp_is_complete_request_t;
+
+typedef struct {
+    uint8_t status;        // 0=complete, 1=incomplete, 2=invalid, 3=unknown
+    uint16_t indent_len;
+    uint8_t *indent;
+} jmp_is_complete_reply_t;
+
 //completions
 typedef struct {
     uint16_t code_len;
@@ -319,4 +351,15 @@ int jmp_serialize_complete_reply(uint8_t *buf, size_t buf_len, const jmp_complet
 // (at the end of code to execute) should be produced 
 // as an execute_result 
 int jmp_serialize_execute_result(uint8_t *buf, size_t buf_len, const jmp_execute_result_t *result, size_t *out_len);
+
+// inspect
+int jmp_deserialize_inspect_request(const uint8_t *buf, size_t buf_len, jmp_inspect_request_t *req, size_t *out_len);
+int jmp_serialize_inspect_reply(uint8_t *buf, size_t buf_len, const jmp_inspect_reply_t *reply, size_t *out_len);
+
+// is_complete
+int jmp_deserialize_is_complete_request(const uint8_t *buf, size_t buf_len, jmp_is_complete_request_t *req, size_t *out_len);
+int jmp_serialize_is_complete_reply(uint8_t *buf, size_t buf_len, const jmp_is_complete_reply_t *reply, size_t *out_len);
+
+// interrupt
+int jmp_serialize_interrupt_reply(uint8_t *buf, size_t buf_len, const jmp_interrupt_reply_t *reply, size_t *out_len);
 #endif
