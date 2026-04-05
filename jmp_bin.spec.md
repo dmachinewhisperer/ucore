@@ -73,10 +73,11 @@ version        : uint8[3]      # [major, minor, patch]
 | `shutdown_request`     | `0x11` | control | frontend -> kernel |
 | `shutdown_reply`       | `0x12` | control | kernel -> frontend |
 | `interrupt_request`    | `0x13` | control | frontend -> kernel |
-| `execute_result`       | `0x14` | iopub   | kernel -> frontend |
-| `comm_open`            | `0x15` | shell   | bidirectional      |
-| `comm_msg`             | `0x16` | shell   | bidirectional      |
-| `comm_close`           | `0x17` | shell   | bidirectional      |
+| `interrupt_reply`      | `0x14` | control | kernel -> frontend |
+| `execute_result`       | `0x15` | iopub   | kernel -> frontend |
+| `comm_open`            | `0x16` | shell   | bidirectional      |
+| `comm_msg`             | `0x17` | shell   | bidirectional      |
+| `comm_close`           | `0x18` | shell   | bidirectional      |
 | `auth_request`         | `0x64` | control | client -> server   |
 | `auth_reply`           | `0x65` | control | server -> client   |
 | `target_not_found`     | `0x66` | control | server -> client   |
@@ -367,7 +368,15 @@ restart : uint8    # boolean
 
 ---
 
-### 5.20 `execute_result` (0x14)
+### 5.20 `interrupt_reply` (0x14)
+
+```
+status : uint8    # 0 = ok, else error
+```
+
+---
+
+### 5.21 `execute_result` (0x15)
 
 ```
 execution_count  : uint16
@@ -386,7 +395,7 @@ metadata_count   : uint16        # always 0 for now
 
 ---
 
-### 5.21 `comm_open` (0x15)
+### 5.22 `comm_open` (0x16)
 
 ```
 comm_id_len  : uint16
@@ -396,7 +405,7 @@ target_id    : uint16       # numeric ID mapped to target_name by the bridge
 
 ---
 
-### 5.22 `comm_msg` (0x16)
+### 5.23 `comm_msg` (0x17)
 
 ```
 comm_id_len : uint16
@@ -406,7 +415,7 @@ data        : uint32        # application-defined payload
 
 ---
 
-### 5.23 `comm_close` (0x17)
+### 5.24 `comm_close` (0x18)
 
 ```
 comm_id_len : uint16
@@ -415,7 +424,7 @@ comm_id     : uint8[]
 
 ---
 
-### 5.24 `auth_request` (0x64)
+### 5.25 `auth_request` (0x64)
 
 Non-standard. Used for client authentication with a relay server.
 
@@ -428,7 +437,7 @@ hmac          : uint8[32]     # HMAC-SHA256
 
 ---
 
-### 5.25 `auth_reply` (0x65)
+### 5.26 `auth_reply` (0x65)
 
 ```
 status : uint8    # 0 = ok, else error
@@ -436,7 +445,7 @@ status : uint8    # 0 = ok, else error
 
 ---
 
-### 5.26 `target_not_found` (0x66)
+### 5.27 `target_not_found` (0x66)
 
 **Content**: empty (zero length)
 
