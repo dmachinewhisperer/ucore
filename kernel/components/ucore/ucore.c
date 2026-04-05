@@ -481,10 +481,9 @@ static void handle_interrupt(request_context_t *req_ctx) {
         .status = STATUS_OK,
     };
     size_t content_len = 0;
-    uint8_t content[sizeof(jmp_status_t)];
-    //jmp_status_t has same pack format as jmp_interrupt_reply_t
-    jmp_serialize_status(content, sizeof(content), (jmp_status_t*)&interrupt_rep, &content_len);
-    ucore_send_reply(req_ctx, JMP_KERNEL_INFO_REPLY, content, content_len);
+    uint8_t content[sizeof(jmp_interrupt_reply_t)];
+    jmp_serialize_interrupt_reply(content, sizeof(content), &interrupt_rep, &content_len);
+    ucore_send_reply(req_ctx, JMP_INTERRUPT_REPLY, content, content_len);
 
     iopub_status(KERNEL_IDLE);
 }
@@ -598,9 +597,11 @@ void ucore_task(void *pvParameters){
         jmp_deserialize_header(msg.header, msg.header_len, &req_header, &out_len);
 
         // forward messages that need micropython runtime context to the runtime task
-        if(req_header.msg_type == JMP_EXECUTE_REQUEST || 
+        if(req_header.msg_type == JMP_EXECUTE_REQUEST ||
            req_header.msg_type == JMP_SHUTDOWN_REQUEST ||
-           req_header.msg_type == JMP_COMPLETE_REQUEST){
+           req_header.msg_type == JMP_COMPLETE_REQUEST ||
+           req_header.msg_type == JMP_INSPECT_REQUEST ||
+           req_header.msg_type == JMP_IS_COMPLETE_REQUEST){
             if (xQueueSend(mpyruntime_queue, &pkt, pdMS_TO_TICKS(1000)) != pdPASS) {
                 goto loop_cleanup;
             }
