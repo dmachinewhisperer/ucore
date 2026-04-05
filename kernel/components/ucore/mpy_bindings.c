@@ -5,8 +5,6 @@
 #include <time.h>
 #include <stddef.h>
 
-#include "ucore/mpy_overrides.h"
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -850,6 +848,136 @@ complete_req_cleanup:
     return do_soft_reset;
 }
 
+// ---- inspect handler ----
+
+static bool handle_inspect_request(request_context_t *req_ctx) {
+    size_t out_len;
+    jmp_inspect_request_t inspect_req;
+    jmp_deserialize_inspect_request(req_ctx->msg->content, req_ctx->msg->content_len, &inspect_req, &out_len);
+
+    // Find the token at cursor position by scanning backwards
+    const char *code = (const char *)inspect_req.code;
+    uint16_t cursor = inspect_req.cursor_pos;
+    if (cursor > inspect_req.code_len) cursor = inspect_req.code_len;
+
+    const char *start = code + cursor;
+    while (start > code && (unichar_isalpha(*(start-1)) || unichar_isdigit(*(start-1)) || *(start-1) == '_' || *(start-1) == '.')) {
+        start--;
+    }
+    size_t token_len = (code + cursor) - start;
+
+    // Try to evaluate the token and get its repr
+    uint8_t found = 0;
+    vstr_t vstr;
+    vstr_init(&vstr, 128);
+
+    if (token_len > 0) {
+        nlr_buf_t nlr;
+        if (nlr_push(&nlr) == 0) {
+            mp_lexer_t *lex = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, start, token_len, 0);
+            mp_parse_tree_t pt = mp_parse(lex, MP_PARSE_EVAL_INPUT);
+            mp_obj_t code_obj = mp_compile(&pt, MP_QSTR__lt_stdin_gt_, false);
+            mp_obj_t result = mp_call_function_0(code_obj);
+
+            // Get repr via vstr-backed print
+            mp_print_t vstr_print = {&vstr, (mp_print_strn_t)vstr_add_strn};
+            mp_obj_print_helper(&vstr_print, result, PRINT_REPR);
+            found = 1;
+            nlr_pop();
+        }
+    }
+
+    // Build reply
+    uint8_t *key = (uint8_t *)"text/plain";
+    uint16_t key_len = 10;
+    uint16_t val_len = (uint16_t)vstr.len;
+    uint8_t *val_ptr = (uint8_t *)vstr.buf;
+
+    jmp_inspect_reply_t reply = {
+        .status = STATUS_OK,
+        .found = found,
+        .data_count = found ? 1 : 0,
+        .data_keys_len = found ? &key_len : NULL,
+        .data_keys = found ? &key : NULL,
+        .data_values_len = found ? &val_len : NULL,
+        .data_values = found ? &val_ptr : NULL,
+        .metadata_count = 0,
+    };
+
+    size_t content_len = 0;
+    size_t max_content = 64 + vstr.len;
+    uint8_t *content = malloc(max_content);
+    if (!content) {
+        vstr_clear(&vstr);
+        return false;
+    }
+
+    jmp_serialize_inspect_reply(content, max_content, &reply, &content_len);
+    ucore_send_reply(req_ctx, JMP_INSPECT_REPLY, content, content_len);
+    free(content);
+    vstr_clear(&vstr);
+
+    return false;
+}
+
+// ---- is_complete handler ----
+
+static bool handle_is_complete_request(request_context_t *req_ctx) {
+    size_t out_len;
+    jmp_is_complete_request_t is_complete_req;
+    jmp_deserialize_is_complete_request(req_ctx->msg->content, req_ctx->msg->content_len, &is_complete_req, &out_len);
+
+    // Try to compile the code. If it fails with incomplete input, it's incomplete.
+    uint8_t status = 0; // complete
+    const char *indent = "";
+    uint16_t indent_len = 0;
+
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        mp_lexer_t *lex = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_,
+            (const char *)is_complete_req.code, is_complete_req.code_len, 0);
+        mp_parse_tree_t pt = mp_parse(lex, MP_PARSE_FILE_INPUT);
+        mp_parse_tree_clear(&pt);
+        status = 0; // complete
+        nlr_pop();
+    } else {
+        // Parse failed — check if it's a syntax error (invalid) or incomplete input
+        mp_obj_t exc = (mp_obj_t)nlr.ret_val;
+        if (mp_obj_is_subclass_fast(MP_OBJ_FROM_PTR(mp_obj_get_type(exc)),
+                                     MP_OBJ_FROM_PTR(&mp_type_SyntaxError))) {
+            // Check if the error message indicates incomplete input
+            // MicroPython raises SyntaxError for both invalid and incomplete
+            // Heuristic: if the code ends with ':', '\', or an unclosed bracket, it's incomplete
+            const char *code = (const char *)is_complete_req.code;
+            size_t len = is_complete_req.code_len;
+            // Strip trailing whitespace
+            while (len > 0 && (code[len-1] == ' ' || code[len-1] == '\n' || code[len-1] == '\r' || code[len-1] == '\t')) len--;
+            if (len > 0 && (code[len-1] == ':' || code[len-1] == '\\')) {
+                status = 1; // incomplete
+                indent = "  ";
+                indent_len = 2;
+            } else {
+                status = 2; // invalid
+            }
+        } else {
+            status = 3; // unknown
+        }
+    }
+
+    jmp_is_complete_reply_t reply = {
+        .status = status,
+        .indent_len = indent_len,
+        .indent = (uint8_t *)indent,
+    };
+
+    size_t content_len = 0;
+    uint8_t content[32];
+    jmp_serialize_is_complete_reply(content, sizeof(content), &reply, &content_len);
+    ucore_send_reply(req_ctx, JMP_IS_COMPLETE_REPLY, content, content_len);
+
+    return false;
+}
+
 // ---- MicroPython runtime task ----
 
 void mp_task(void *pvParameter) {
@@ -932,6 +1060,12 @@ soft_reset:
                     break;
                 case JMP_COMPLETE_REQUEST:
                     do_soft_reset = handle_complete_request_msg(&req_ctx);
+                    break;
+                case JMP_INSPECT_REQUEST:
+                    do_soft_reset = handle_inspect_request(&req_ctx);
+                    break;
+                case JMP_IS_COMPLETE_REQUEST:
+                    do_soft_reset = handle_is_complete_request(&req_ctx);
                     break;
                 default:
                     break;    
