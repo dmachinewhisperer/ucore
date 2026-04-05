@@ -1,0 +1,248 @@
+{
+  "_comment": "Canonical test vectors for jmp_bin.spec.md. Each entry has a JSON content object and the expected binary hex of the CONTENT section only (not the envelope or header).",
+  "kernel_info_request": {
+    "json": {},
+    "binary": ""
+  },
+  "kernel_info_reply": {
+    "json": {
+      "status": "ok",
+      "protocol_version": "5.3.0",
+      "implementation": "micropython",
+      "implementation_version": "1.0.0",
+      "language_info": {
+        "name": "MicroPython",
+        "version": "0.1.0",
+        "mimetype": "text/x-python",
+        "file_extension": ".py"
+      },
+      "banner": "MicroPython Kernel",
+      "debugger": false
+    },
+    "binary": "00050300000b6d6963726f707974686f6e010000000b4d6963726f507974686f6e000100000d746578742f782d707974686f6e00032e707900124d6963726f507974686f6e204b65726e656c00"
+  },
+  "execute_request": {
+    "json": {
+      "code": "print('hi')",
+      "silent": false,
+      "store_history": true,
+      "user_expressions": {},
+      "allow_stdin": true,
+      "stop_on_error": true
+    },
+    "binary": "000b7072696e742827686927290e"
+  },
+  "execute_reply_ok": {
+    "msg_type": "execute_reply",
+    "json": {
+      "status": "ok",
+      "execution_count": 5
+    },
+    "binary": "000005"
+  },
+  "execute_reply_error": {
+    "msg_type": "execute_reply",
+    "json": {
+      "status": "error",
+      "ename": "ZeroDivisionError",
+      "evalue": "divide by zero",
+      "traceback": [
+        "Traceback (most recent call last):",
+        "  File \"<stdin>\", line 1",
+        "ZeroDivisionError: divide by zero"
+      ],
+      "execution_count": 3
+    },
+    "binary": "0100115a65726f4469766973696f6e4572726f72000e646976696465206279207a65726f005d54726163656261636b20286d6f737420726563656e742063616c6c206c617374293a0a202046696c6520223c737464696e3e222c206c696e6520310a5a65726f4469766973696f6e4572726f723a20646976696465206279207a65726f0003"
+  },
+  "stream_stdout": {
+    "msg_type": "stream",
+    "json": {
+      "name": "stdout",
+      "text": "hello"
+    },
+    "binary": "00000568656c6c6f"
+  },
+  "stream_stderr": {
+    "msg_type": "stream",
+    "json": {
+      "name": "stderr",
+      "text": "oops"
+    },
+    "binary": "0100046f6f7073"
+  },
+  "error": {
+    "json": {
+      "status": "error",
+      "ename": "NameError",
+      "evalue": "name 'x' isn't defined",
+      "traceback": [
+        "Traceback (most recent call last):",
+        "NameError: name 'x' isn't defined"
+      ],
+      "execution_count": 0
+    },
+    "binary": "0100094e616d654572726f7200166e616d65202778272069736e277420646566696e6564004454726163656261636b20286d6f737420726563656e742063616c6c206c617374293a0a4e616d654572726f723a206e616d65202778272069736e277420646566696e65640000"
+  },
+  "display_data": {
+    "json": {
+      "data": {
+        "text/plain": "42"
+      },
+      "metadata": {}
+    },
+    "binary": "0001000a746578742f706c61696e000234320000"
+  },
+  "status_busy": {
+    "msg_type": "status",
+    "json": {
+      "execution_state": "busy"
+    },
+    "binary": "00"
+  },
+  "status_idle": {
+    "msg_type": "status",
+    "json": {
+      "execution_state": "idle"
+    },
+    "binary": "01"
+  },
+  "status_starting": {
+    "msg_type": "status",
+    "json": {
+      "execution_state": "starting"
+    },
+    "binary": "02"
+  },
+  "input_request": {
+    "json": {
+      "prompt": "Enter: ",
+      "password": false
+    },
+    "binary": "0007456e7465723a2000"
+  },
+  "input_reply": {
+    "json": {
+      "value": "42"
+    },
+    "binary": "00023432"
+  },
+  "complete_request": {
+    "json": {
+      "code": "pri",
+      "cursor_pos": 3
+    },
+    "binary": "00037072690003"
+  },
+  "complete_reply": {
+    "json": {
+      "matches": [
+        "print"
+      ],
+      "cursor_start": 0,
+      "cursor_end": 3,
+      "metadata": {},
+      "status": "ok"
+    },
+    "binary": "000100057072696e7400000003000000"
+  },
+  "inspect_request": {
+    "json": {
+      "code": "print",
+      "cursor_pos": 5,
+      "detail_level": 0
+    },
+    "binary": "00057072696e74000500"
+  },
+  "inspect_reply_found": {
+    "msg_type": "inspect_reply",
+    "json": {
+      "status": "ok",
+      "found": true,
+      "data": {
+        "text/plain": "<function>"
+      },
+      "metadata": {}
+    },
+    "binary": "00010001000a746578742f706c61696e000a3c66756e6374696f6e3e0000"
+  },
+  "inspect_reply_not_found": {
+    "msg_type": "inspect_reply",
+    "json": {
+      "status": "ok",
+      "found": false,
+      "data": {},
+      "metadata": {}
+    },
+    "binary": "000000000000"
+  },
+  "is_complete_request": {
+    "json": {
+      "code": "def foo():\n"
+    },
+    "binary": "000b64656620666f6f28293a0a"
+  },
+  "is_complete_reply_complete": {
+    "msg_type": "is_complete_reply",
+    "json": {
+      "status": "complete",
+      "indent": ""
+    },
+    "binary": "000000"
+  },
+  "is_complete_reply_incomplete": {
+    "msg_type": "is_complete_reply",
+    "json": {
+      "status": "incomplete",
+      "indent": "  "
+    },
+    "binary": "0100022020"
+  },
+  "shutdown_request": {
+    "json": {
+      "restart": true
+    },
+    "binary": "01"
+  },
+  "shutdown_reply": {
+    "json": {
+      "status": "ok",
+      "restart": true
+    },
+    "binary": "0001"
+  },
+  "interrupt_request": {
+    "json": {},
+    "binary": ""
+  },
+  "execute_result": {
+    "json": {
+      "execution_count": 1,
+      "data": {
+        "text/plain": "4"
+      },
+      "metadata": {}
+    },
+    "binary": "00010001000a746578742f706c61696e0001340000"
+  },
+  "comm_open": {
+    "json": {
+      "comm_id": "abc-123",
+      "target_id": 1
+    },
+    "binary": "00076162632d3132330001"
+  },
+  "comm_msg": {
+    "json": {
+      "comm_id": "abc-123",
+      "data": 42
+    },
+    "binary": "00076162632d3132330000002a"
+  },
+  "comm_close": {
+    "json": {
+      "comm_id": "abc-123"
+    },
+    "binary": "00076162632d313233"
+  }
+}
