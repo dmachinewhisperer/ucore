@@ -23,10 +23,11 @@ const MSG_TYPES = {
   SHUTDOWN_REQUEST: 0x11,
   SHUTDOWN_REPLY: 0x12,
   INTERRUPT_REQUEST: 0x13,
-  EXECUTE_RESULT: 0x14,
-  COMM_OPEN: 0x15,
-  COMM_MSG: 0x16,
-  COMM_CLOSE: 0x17,
+  INTERRUPT_REPLY: 0x14,
+  EXECUTE_RESULT: 0x15,
+  COMM_OPEN: 0x16,
+  COMM_MSG: 0x17,
+  COMM_CLOSE: 0x18,
 
   AUTH_REQUEST: 0x64,
   AUTH_REPLY: 0x65,
@@ -571,6 +572,19 @@ class InterruptRequestConverter {
   static fromBinary() { return {}; }
 }
 
+class InterruptReplyConverter {
+  static toBinary(c) {
+    const w = new BinaryWriter(1);
+    w.uint8(c.status === 'ok' ? 0 : 1);
+    return w.toBuffer();
+  }
+
+  static fromBinary(buf) {
+    const r = new BinaryReader(buf);
+    return { status: STATUS_NAMES[r.uint8()] || 'ok' };
+  }
+}
+
 class ExecuteResultConverter {
   static toBinary(c) {
     const w = new BinaryWriter();
@@ -702,6 +716,7 @@ const MESSAGE_CONVERTERS = {
   'shutdown_request': ShutdownRequestConverter,
   'shutdown_reply': ShutdownReplyConverter,
   'interrupt_request': InterruptRequestConverter,
+  'interrupt_reply': InterruptReplyConverter,
   'execute_result': ExecuteResultConverter,
   'comm_open': CommOpenConverter,
   'comm_msg': CommMsgConverter,
