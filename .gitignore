@@ -1,10 +1,8 @@
-.vscode
-binutils
-build
-lib
-managed_components
-partitions-*
-devdocs
-upip
-older
-ushell
+# Python
+.venv/
+
+# Bridge (Node.js)
+bridge/node_modules/
+
+# Notes
+checkpoint.txt

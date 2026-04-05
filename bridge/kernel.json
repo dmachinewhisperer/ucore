@@ -1,0 +1,14 @@
+{
+    "argv": [
+      "node",
+      "kernel.js",
+      "{connection_file}"
+    ],
+    "interrupt_mode": "message",
+    "display_name": "MicroPython (µcore)",
+    "language": "python",
+    "metadata": {
+        "debugger": false
+      }
+  }
+  
