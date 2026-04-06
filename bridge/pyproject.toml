@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ucore-kernel"
+version = "0.1.0"
+description = "Jupyter kernel for MicroPython on ESP32 via ucore"
+requires-python = ">=3.10"
+dependencies = [
+    "ipykernel>=6.0",
+    "jupyter-client>=8.0",
+    "cobs",
+    "pyserial",
+]
+
+[project.optional-dependencies]
+websocket = ["websockets"]
+
+[project.entry-points."jupyter_client.kernel_provisioners"]
+ucore-provisioner = "ucore_kernel.provisioner:UCoreProvisioner"
+
+[tool.setuptools]
+packages = ["ucore_kernel"]
