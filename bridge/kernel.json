@@ -1,14 +1,15 @@
 {
-    "argv": [
-      "node",
-      "kernel.js",
-      "{connection_file}"
-    ],
-    "interrupt_mode": "message",
-    "display_name": "MicroPython (µcore)",
-    "language": "python",
-    "metadata": {
-        "debugger": false
-      }
+  "argv": [
+    "python3", "-m", "ucore_kernel",
+    "-f", "{connection_file}"
+  ],
+  "interrupt_mode": "message",
+  "display_name": "MicroPython (µcore)",
+  "language": "python",
+  "metadata": {
+    "debugger": false,
+    "kernel_provisioner": {
+      "provisioner_name": "ucore-provisioner"
+    }
   }
-  
+}
