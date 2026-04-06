@@ -1,12 +1,17 @@
 # Python
 .venv/
+__pycache__/
+*.egg-info/
 
-# Bridge (Node.js)
-bridge/node_modules/
+# Bridge
 bridge/connection_file
 bridge/output.log
+bridge/.ucore_kernel_state.json
 bridge/*.ipynb
 bridge/.ipynb_checkpoints
+
+# Reference (old JS code kept for porting)
+.ref/
 
 # Notes
 checkpoint.txt
