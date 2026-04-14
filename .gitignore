@@ -3,12 +3,12 @@
 __pycache__/
 *.egg-info/
 
-# Bridge
-bridge/connection_file
-bridge/output.log
-bridge/.ucore_kernel_state.json
-bridge/*.ipynb
-bridge/.ipynb_checkpoints
+# Kernel runtime
+ukernel/connection_file
+ukernel/output.log
+ukernel/.ucore_kernel_state.json
+ukernel/msgs.map
+ukernel/.ipynb_checkpoints
 
 # Reference (old JS code kept for porting)
 .ref/
@@ -18,3 +18,5 @@ checkpoint.txt
 
 *.ipynb
 .ipynb_checkpoints
+notebooks
+devdocs
