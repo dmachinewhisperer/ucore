@@ -1,46 +1,75 @@
-# ucore jupyter kernel — bridges jupyter to micropython on esp32 via
-# a binary protocol over tcp/serial/websocket.
+# ucore jupyter kernel — routes code between a local python kernel
+# and a remote micropython device on esp32 via a binary protocol
+# over tcp/serial/websocket.
+#
+# default: execute on local python.  %%ucore magic: execute on device.
 
 import asyncio
 import logging
 import os
+import sys
 import uuid
 
 from ipykernel.kernelbase import Kernel
+from jupyter_client import KernelManager
 
 from .transport import create_transport
 
 log = logging.getLogger(__name__)
 
+UCORE_MAGIC = "%%ucore"
+
+
+def _strip_magic(code):
+    """Remove %%ucore magic from first line, return (is_device, clean_code)."""
+    first_line = code.split("\n", 1)[0].strip()
+    if first_line == UCORE_MAGIC:
+        return True, code.split("\n", 1)[1] if "\n" in code else ""
+    return False, code
+
 
 class UCoreKernel(Kernel):
     implementation = "ucore"
-    implementation_version = "0.1.0"
+    implementation_version = "0.2.0"
     language = "python"
-    language_version = "3.4"
+    language_version = f"{sys.version_info.major}.{sys.version_info.minor}"
     language_info = {
-        "name": "micropython",
-        "version": "1.24",
+        "name": "python",
+        "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "mimetype": "text/x-python",
         "file_extension": ".py",
     }
-    banner = "µcore — MicroPython on ESP32"
+    banner = "µcore — Python + MicroPython (%%ucore)"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        # device transport
         self._transport = None
         self._pending: dict[str, asyncio.Future] = {}
-        # maps our request msg_id -> jupyter parent header, so side-effect
-        # messages from the device can be published with the correct parent
         self._jupyter_parents: dict[str, dict] = {}
         self._transport_type = os.environ.get("UCORE_TRANSPORT", "tcp")
         self._transport_host = os.environ.get("UCORE_HOST", "localhost")
         self._transport_port = int(os.environ.get("UCORE_PORT", "5555"))
+        # local python kernel
+        self._local_km = None
+        self._local_kc = None
 
     def start(self):
         super().start()
         loop = asyncio.get_event_loop()
-        loop.run_until_complete(self._connect_transport())
+        loop.run_until_complete(self._start_local_kernel())
+        try:
+            loop.run_until_complete(self._connect_transport())
+        except Exception:
+            log.warning("device transport not available — %%ucore cells will fail")
+
+    async def _start_local_kernel(self):
+        self._local_km = KernelManager(kernel_name="python3")
+        self._local_km.start_kernel()
+        self._local_kc = self._local_km.client()
+        self._local_kc.start_channels()
+        self._local_kc.wait_for_ready(timeout=30)
+        log.info("local python kernel ready")
 
     async def _connect_transport(self):
         self._transport = create_transport(
@@ -51,6 +80,68 @@ class UCoreKernel(Kernel):
         self._transport.on_message(self._handle_device_message)
         await self._transport.connect()
         log.info("transport connected")
+
+    # ── local python execution ─────────────────────────────────────
+
+    async def _execute_local(self, code, silent, store_history, allow_stdin, parent):
+        msg_id = self._local_kc.execute(
+            code, silent=silent, store_history=store_history,
+            allow_stdin=allow_stdin,
+        )
+        # proxy iopub messages until we get the execute_reply
+        while True:
+            try:
+                msg = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: self._local_kc.get_iopub_msg(timeout=30)
+                )
+            except Exception:
+                break
+
+            if msg["parent_header"].get("msg_id") != msg_id:
+                continue
+
+            msg_type = msg["header"]["msg_type"]
+            content = msg["content"]
+
+            if msg_type in ("stream", "error", "display_data", "execute_result"):
+                self._publish(msg_type, content, parent)
+            elif msg_type == "status" and content.get("execution_state") == "idle":
+                break
+
+        # get the execute_reply matching our msg_id
+        while True:
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._local_kc.get_shell_msg(timeout=30)
+            )
+            if reply["parent_header"].get("msg_id") == msg_id:
+                return reply["content"]
+
+    async def _complete_local(self, code, cursor_pos):
+        msg_id = self._local_kc.complete(code, cursor_pos)
+        while True:
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._local_kc.get_shell_msg(timeout=10)
+            )
+            if reply["parent_header"].get("msg_id") == msg_id:
+                return reply["content"]
+
+    async def _inspect_local(self, code, cursor_pos, detail_level):
+        msg_id = self._local_kc.inspect(code, cursor_pos, detail_level)
+        while True:
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._local_kc.get_shell_msg(timeout=10)
+            )
+            if reply["parent_header"].get("msg_id") == msg_id:
+                return reply["content"]
+
+    async def _is_complete_local(self, code):
+        msg_id = self._local_kc.is_complete(code)
+        while True:
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._local_kc.get_shell_msg(timeout=10)
+            )
+            if reply["parent_header"].get("msg_id") == msg_id:
+                return reply["content"]
 
     # ── device communication ────────────────────────────────────────
 
@@ -155,15 +246,68 @@ class UCoreKernel(Kernel):
                          user_expressions=None, allow_stdin=False,
                          *, cell_meta=None, cell_id=None):
         parent = self.get_parent()
+        is_device, clean_code = _strip_magic(code)
 
-        reply_msg = await self._request("execute_request", {
-            "code": code,
-            "silent": silent,
-            "store_history": store_history,
-            "allow_stdin": allow_stdin,
-            "stop_on_error": True,
-            "user_expressions": {},
-        }, parent_header=parent)
+        if not is_device:
+            return await self._do_execute_local(
+                clean_code, silent, store_history, allow_stdin, parent)
+
+        return await self._do_execute_device(
+            clean_code, silent, store_history, allow_stdin, parent)
+
+    async def _do_execute_local(self, code, silent, store_history, allow_stdin, parent):
+        content = await self._execute_local(code, silent, store_history, allow_stdin, parent)
+        status = content.get("status", "ok")
+
+        if status == "ok":
+            return {
+                "status": "ok",
+                "execution_count": content.get("execution_count", self.execution_count),
+                "user_expressions": {},
+            }
+
+        error_content = {
+            "ename": content.get("ename", "Error"),
+            "evalue": content.get("evalue", ""),
+            "traceback": content.get("traceback", []),
+        }
+        return {
+            "status": "error",
+            "execution_count": content.get("execution_count", self.execution_count),
+            **error_content,
+        }
+
+    def _device_error(self, ename, evalue):
+        error_content = {
+            "ename": ename,
+            "evalue": evalue,
+            "traceback": [f"\x1b[31m{ename}\x1b[0m: {evalue}"],
+        }
+        self.send_response(self.iopub_socket, "error", error_content)
+        return {
+            "status": "error",
+            "execution_count": self.execution_count,
+            **error_content,
+        }
+
+    async def _do_execute_device(self, code, silent, store_history, allow_stdin, parent):
+        if not self._transport or not self._transport.connected:
+            return self._device_error(
+                "ConnectionError",
+                "Device not connected. Start the simulator or connect the ESP32.",
+            )
+
+        try:
+            reply_msg = await self._request("execute_request", {
+                "code": code,
+                "silent": silent,
+                "store_history": store_history,
+                "allow_stdin": allow_stdin,
+                "stop_on_error": True,
+                "user_expressions": {},
+            }, parent_header=parent)
+        except (ConnectionError, TimeoutError) as e:
+            return self._device_error(type(e).__name__, str(e))
 
         content = reply_msg.get("content", {})
         status = content.get("status", "ok")
@@ -175,7 +319,6 @@ class UCoreKernel(Kernel):
                 "user_expressions": {},
             }
 
-        # ipykernel expects us to publish the error on iopub before returning
         error_content = {
             "ename": content.get("ename", "Error"),
             "evalue": content.get("evalue", ""),
@@ -190,8 +333,15 @@ class UCoreKernel(Kernel):
         }
 
     async def do_complete(self, code, cursor_pos):
+        is_device, clean_code = _strip_magic(code)
+        if not is_device:
+            return await self._complete_local(clean_code, cursor_pos)
+        if not self._transport or not self._transport.connected:
+            return {"matches": [], "cursor_start": cursor_pos,
+                    "cursor_end": cursor_pos, "metadata": {}, "status": "ok"}
+
         reply_msg = await self._request("complete_request", {
-            "code": code,
+            "code": clean_code,
             "cursor_pos": cursor_pos,
         })
         return reply_msg.get("content", {
@@ -203,8 +353,14 @@ class UCoreKernel(Kernel):
         })
 
     async def do_inspect(self, code, cursor_pos, detail_level=0, omit_sections=()):
+        is_device, clean_code = _strip_magic(code)
+        if not is_device:
+            return await self._inspect_local(clean_code, cursor_pos, detail_level)
+        if not self._transport or not self._transport.connected:
+            return {"status": "ok", "found": False, "data": {}, "metadata": {}}
+
         reply_msg = await self._request("inspect_request", {
-            "code": code,
+            "code": clean_code,
             "cursor_pos": cursor_pos,
             "detail_level": detail_level,
         })
@@ -216,8 +372,14 @@ class UCoreKernel(Kernel):
         })
 
     async def do_is_complete(self, code):
+        is_device, clean_code = _strip_magic(code)
+        if not is_device:
+            return await self._is_complete_local(clean_code)
+        if not self._transport or not self._transport.connected:
+            return {"status": "unknown"}
+
         reply_msg = await self._request("is_complete_request", {
-            "code": code,
+            "code": clean_code,
         })
         return reply_msg.get("content", {"status": "unknown"})
 
@@ -228,6 +390,10 @@ class UCoreKernel(Kernel):
             pass
         if self._transport:
             await self._transport.disconnect()
+        if self._local_kc:
+            self._local_kc.stop_channels()
+        if self._local_km:
+            self._local_km.shutdown_kernel(now=True)
         return {"status": "ok", "restart": restart}
 
 

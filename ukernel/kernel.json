@@ -1,10 +1,10 @@
 {
   "argv": [
-    "python3", "-m", "ucore_kernel",
+    "python3", "-m", "ukernel",
     "-f", "{connection_file}"
   ],
   "interrupt_mode": "message",
-  "display_name": "MicroPython (µcore)",
+  "display_name": "µcore",
   "language": "python",
   "metadata": {
     "debugger": false,
