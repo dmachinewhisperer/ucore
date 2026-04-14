@@ -1,0 +1,15 @@
+- name: sensor_reading
+  description: Reading analog and digital sensors on ESP32 (ADC, I2C, temperature, humidity, etc.)
+  file: sensor_reading.txt
+
+- name: actuator_control
+  description: Controlling LEDs, servos, motors, relays, and other output devices on ESP32
+  file: actuator_control.txt
+
+- name: plotting
+  description: Visualizing data with matplotlib, creating charts and graphs from device readings
+  file: plotting.txt
+
+- name: data_bridge
+  description: Passing data between the ESP32 device and local Python (stdout parsing, variable sharing)
+  file: data_bridge.txt

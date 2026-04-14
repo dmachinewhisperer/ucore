@@ -1,0 +1,59 @@
+# Actuator Control on ESP32
+
+## LED Blink
+
+```python
+%%ucore
+from machine import Pin
+import time
+
+led = Pin(2, Pin.OUT)  # built-in LED on most ESP32 boards
+for i in range(10):
+    led.value(not led.value())
+    time.sleep_ms(500)
+led.value(0)
+print("done")
+```
+
+## PWM (LED dimming, servo, buzzer)
+
+```python
+%%ucore
+from machine import Pin, PWM
+
+pwm = PWM(Pin(2), freq=1000, duty=512)  # 50% duty
+# duty range: 0-1023
+pwm.duty(256)   # 25%
+pwm.duty(0)     # off
+pwm.deinit()
+```
+
+## Servo Control
+
+```python
+%%ucore
+from machine import Pin, PWM
+
+servo = PWM(Pin(13), freq=50)
+# duty for servo: ~26 (0deg) to ~128 (180deg)
+servo.duty(26)   # 0 degrees
+servo.duty(77)   # 90 degrees
+servo.duty(128)  # 180 degrees
+servo.deinit()
+```
+
+## Relay
+
+```python
+%%ucore
+from machine import Pin
+
+relay = Pin(5, Pin.OUT)
+relay.value(1)  # on
+relay.value(0)  # off
+```
+
+## Notes
+- Always `deinit()` PWM when done to release the pin.
+- Built-in LED is typically GPIO 2 but varies by board.
+- For continuous operations, use a loop with `time.sleep_ms()`.

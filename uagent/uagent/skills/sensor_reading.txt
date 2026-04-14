@@ -1,0 +1,53 @@
+# Sensor Reading on ESP32
+
+## ADC (Analog to Digital)
+
+```python
+%%ucore
+from machine import ADC, Pin
+import time
+
+adc = ADC(Pin(34))  # GPIO 34
+adc.atten(ADC.ATTN_11DB)  # 0-3.3V range
+adc.width(ADC.WIDTH_12BIT)  # 0-4095
+
+readings = []
+for i in range(100):
+    readings.append(adc.read())
+    time.sleep_ms(100)
+
+print(readings)
+```
+
+## I2C Sensors
+
+```python
+%%ucore
+from machine import I2C, Pin
+
+i2c = I2C(0, scl=Pin(22), sda=Pin(21), freq=400000)
+devices = i2c.scan()
+print("I2C devices:", devices)
+```
+
+## Temperature (DS18B20)
+
+```python
+%%ucore
+import machine, onewire, ds18x20, time
+
+dat = machine.Pin(4)
+ds = ds18x20.DS18X20(onewire.OneWire(dat))
+roms = ds.scan()
+ds.convert_temp()
+time.sleep_ms(750)
+for rom in roms:
+    print(ds.read_temp(rom))
+```
+
+## Timed sampling pattern
+
+When sampling over a duration, collect into a list and print at the end.
+The local Python cell can then parse the printed list.
+Always use `time.sleep_ms()` for sub-second intervals.
+Print as JSON-compatible list for easy parsing: `print(readings)`.
