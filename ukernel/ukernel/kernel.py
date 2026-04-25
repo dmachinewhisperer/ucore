@@ -13,19 +13,28 @@ import uuid
 from ipykernel.kernelbase import Kernel
 from jupyter_client import KernelManager
 
+from .agent_client import AgentClient
 from .transport import create_transport
 
 log = logging.getLogger(__name__)
 
 UCORE_MAGIC = "%%ucore"
+UAGENT_MAGIC = "%%uagent"
 
 
-def _strip_magic(code):
-    """Remove %%ucore magic from first line, return (is_device, clean_code)."""
+def _detect_magic(code):
+    """Detect cell magic and return (magic, clean_code).
+
+    Returns one of "ucore", "uagent", or None as the magic.
+    """
     first_line = code.split("\n", 1)[0].strip()
+    rest = code.split("\n", 1)[1] if "\n" in code else ""
+
     if first_line == UCORE_MAGIC:
-        return True, code.split("\n", 1)[1] if "\n" in code else ""
-    return False, code
+        return "ucore", rest
+    if first_line == UAGENT_MAGIC:
+        return "uagent", rest
+    return None, code
 
 
 class UCoreKernel(Kernel):
@@ -39,7 +48,7 @@ class UCoreKernel(Kernel):
         "mimetype": "text/x-python",
         "file_extension": ".py",
     }
-    banner = "µcore — Python + MicroPython (%%ucore)"
+    banner = "µcore — Python + MicroPython (%%ucore) + Agent (%%uagent)"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -53,6 +62,8 @@ class UCoreKernel(Kernel):
         # local python kernel
         self._local_km = None
         self._local_kc = None
+        # agent
+        self._agent = AgentClient()
 
     def start(self):
         super().start()
@@ -246,13 +257,14 @@ class UCoreKernel(Kernel):
                          user_expressions=None, allow_stdin=False,
                          *, cell_meta=None, cell_id=None):
         parent = self.get_parent()
-        is_device, clean_code = _strip_magic(code)
+        magic, clean_code = _detect_magic(code)
 
-        if not is_device:
-            return await self._do_execute_local(
+        if magic == "uagent":
+            return await self._do_execute_agent(clean_code, parent)
+        if magic == "ucore":
+            return await self._do_execute_device(
                 clean_code, silent, store_history, allow_stdin, parent)
-
-        return await self._do_execute_device(
+        return await self._do_execute_local(
             clean_code, silent, store_history, allow_stdin, parent)
 
     async def _do_execute_local(self, code, silent, store_history, allow_stdin, parent):
@@ -275,6 +287,31 @@ class UCoreKernel(Kernel):
             "status": "error",
             "execution_count": content.get("execution_count", self.execution_count),
             **error_content,
+        }
+
+    async def _do_execute_agent(self, code, parent):
+        def on_update(update_type, text):
+            if update_type == "text":
+                self._publish("stream", {"name": "stdout", "text": text}, parent)
+            elif update_type == "tool_start":
+                self._publish("stream", {
+                    "name": "stdout", "text": f"\n→ {text}\n",
+                }, parent)
+            elif update_type == "tool_done":
+                self._publish("stream", {
+                    "name": "stdout", "text": f"  ✓ done\n",
+                }, parent)
+
+        try:
+            await self._agent.prompt(code, on_update)
+        except Exception as e:
+            log.exception("agent execution failed")
+            return self._device_error("AgentError", str(e))
+
+        return {
+            "status": "ok",
+            "execution_count": self.execution_count,
+            "user_expressions": {},
         }
 
     def _device_error(self, ename, evalue):
@@ -333,9 +370,12 @@ class UCoreKernel(Kernel):
         }
 
     async def do_complete(self, code, cursor_pos):
-        is_device, clean_code = _strip_magic(code)
-        if not is_device:
+        magic, clean_code = _detect_magic(code)
+        if magic is None:
             return await self._complete_local(clean_code, cursor_pos)
+        if magic == "uagent":
+            return {"matches": [], "cursor_start": cursor_pos,
+                    "cursor_end": cursor_pos, "metadata": {}, "status": "ok"}
         if not self._transport or not self._transport.connected:
             return {"matches": [], "cursor_start": cursor_pos,
                     "cursor_end": cursor_pos, "metadata": {}, "status": "ok"}
@@ -353,10 +393,10 @@ class UCoreKernel(Kernel):
         })
 
     async def do_inspect(self, code, cursor_pos, detail_level=0, omit_sections=()):
-        is_device, clean_code = _strip_magic(code)
-        if not is_device:
+        magic, clean_code = _detect_magic(code)
+        if magic is None:
             return await self._inspect_local(clean_code, cursor_pos, detail_level)
-        if not self._transport or not self._transport.connected:
+        if magic != "ucore" or not self._transport or not self._transport.connected:
             return {"status": "ok", "found": False, "data": {}, "metadata": {}}
 
         reply_msg = await self._request("inspect_request", {
@@ -372,10 +412,10 @@ class UCoreKernel(Kernel):
         })
 
     async def do_is_complete(self, code):
-        is_device, clean_code = _strip_magic(code)
-        if not is_device:
+        magic, clean_code = _detect_magic(code)
+        if magic is None:
             return await self._is_complete_local(clean_code)
-        if not self._transport or not self._transport.connected:
+        if magic != "ucore" or not self._transport or not self._transport.connected:
             return {"status": "unknown"}
 
         reply_msg = await self._request("is_complete_request", {
@@ -390,6 +430,7 @@ class UCoreKernel(Kernel):
             pass
         if self._transport:
             await self._transport.disconnect()
+        await self._agent.shutdown()
         if self._local_kc:
             self._local_kc.stop_channels()
         if self._local_km:
