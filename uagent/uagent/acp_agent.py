@@ -41,11 +41,18 @@ log = logging.getLogger(__name__)
 class Session:
     """Holds conversation state for a single chat session."""
 
-    def __init__(self, session_id, cwd):
+    def __init__(self, session_id, cwd, excluded_tools=None):
         self.session_id = session_id
         self.cwd = cwd
         self.notebook_path = None
+        self.excluded_tools = set(excluded_tools or [])
         self.messages = [{"role": "system", "content": build_system_prompt()}]
+
+    def get_tool_schemas(self):
+        """Return TOOL_SCHEMAS filtered by this session's exclusions."""
+        if not self.excluded_tools:
+            return TOOL_SCHEMAS
+        return [s for s in TOOL_SCHEMAS if s["function"]["name"] not in self.excluded_tools]
 
 
 class UCoreAcpAgent:
@@ -77,8 +84,9 @@ class UCoreAcpAgent:
 
     async def new_session(self, cwd, mcp_servers=None, **kwargs):
         session_id = str(uuid.uuid4())
-        self._sessions[session_id] = Session(session_id, cwd)
-        log.info("new session: %s", session_id)
+        excluded_tools = kwargs.get("excluded_tools")
+        self._sessions[session_id] = Session(session_id, cwd, excluded_tools)
+        log.info("new session: %s (excluded_tools=%s)", session_id, excluded_tools)
         return NewSessionResponse(session_id=session_id)
 
     async def load_session(self, cwd, session_id, mcp_servers=None, **kwargs):
@@ -225,6 +233,7 @@ class UCoreAcpAgent:
 
     async def _infer(self, session):
         """Call the LLM with retry on rate limit errors."""
+        tools = session.get_tool_schemas()
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -233,7 +242,7 @@ class UCoreAcpAgent:
                     lambda: litellm.completion(
                         model=config.MODEL,
                         messages=session.messages,
-                        tools=TOOL_SCHEMAS,
+                        tools=tools,
                         timeout=config.LLM_TIMEOUT,
                     ),
                 )
