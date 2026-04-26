@@ -622,12 +622,12 @@ int jmp_serialize_comm_msg(uint8_t *buf, size_t buf_len, const jmp_comm_msg_t *m
         return ret;
     }
 
-    if (check_buffer_space(pos, 4, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
+    // data: uint16 length + raw bytes (variable). Reuses the same
+    // length-prefixed-bytes shape as comm_id so host parser is symmetric.
+    ret = write_string_field(buf, buf_len, &pos, msg->data_len, msg->data);
+    if (ret != BINRPC_OK) {
+        return ret;
     }
-
-    write_uint32_be(buf + pos, msg->data);
-    pos += 4;
 
     *out_len = pos;
     return BINRPC_OK;
@@ -646,12 +646,10 @@ int jmp_deserialize_comm_msg(const uint8_t *buf, size_t buf_len, jmp_comm_msg_t 
         return ret;
     }
 
-    if (check_buffer_space(pos, 4, buf_len) != 0) {
-        return BINRPC_ERR_BUFFER_TOO_SMALL;
+    ret = read_string_field(buf, buf_len, &pos, &msg->data_len, &msg->data);
+    if (ret != BINRPC_OK) {
+        return ret;
     }
-
-    msg->data = read_uint32_be(buf + pos);
-    pos += 4;
 
     *out_len = pos;
     return BINRPC_OK;

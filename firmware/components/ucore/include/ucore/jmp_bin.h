@@ -214,7 +214,8 @@ typedef struct {
 typedef struct {
     uint16_t comm_id_len;
     uint8_t *comm_id;
-    uint32_t data;
+    uint16_t data_len;
+    uint8_t *data;
 } jmp_comm_msg_t;
 
 typedef struct {

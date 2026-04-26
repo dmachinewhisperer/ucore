@@ -505,12 +505,18 @@ def decode_comm_open(data):
 def encode_comm_msg(c):
     w = BinaryWriter()
     w.string(c.get("comm_id", ""))
-    w.uint32(c.get("data", 0))
+    payload = c.get("data", b"")
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8")
+    w.uint16(len(payload))
+    w.raw(payload)
     return w.to_bytes()
 
 def decode_comm_msg(data):
     r = BinaryReader(data)
-    return {"comm_id": r.string(), "data": r.uint32()}
+    comm_id = r.string()
+    n = r.uint16()
+    return {"comm_id": comm_id, "data": r.raw(n)}
 
 
 def encode_comm_close(c):
