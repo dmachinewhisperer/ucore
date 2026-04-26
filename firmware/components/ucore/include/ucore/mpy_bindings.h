@@ -1,5 +1,5 @@
-#ifndef INTERPRETER_H_
-#define INTERPRETER_H_
+#ifndef UCORE_MPY_BINDINGS_H_
+#define UCORE_MPY_BINDINGS_H_
 #include <stdbool.h>
 
 #include "py/runtime.h"    // Core runtime functions (mp_obj_t, etc.)

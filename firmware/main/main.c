@@ -10,12 +10,6 @@
 #include "freertos/FreeRTOS.h"
 #include <freertos/task.h>
 #include "esp_netif.h"
-#include "protocol_examples_common.h"
-
-// #include "esp_vfs.h"
-// #include "esp_vfs_fat.h"
-
-// #include "lib/oofatfs/ff.h"
 
 #include "ucore/ucore.h"
 #include "ucore/mpy_bindings.h"
@@ -39,12 +33,6 @@ void app_main(void)
     
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
-     * Read "Establishing Wi-Fi or Ethernet Connection" section in
-     * examples/protocols/README.md for more information about this function.
-     */
-    //ESP_ERROR_CHECK(example_connect());
 
     // Pick a transport backend and start ucore.
     ucore_register_transport(&ucore_transport_uart);
