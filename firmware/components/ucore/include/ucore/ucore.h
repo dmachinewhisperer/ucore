@@ -150,4 +150,9 @@ int ucore_send_async(int msg_type, uint8_t* content, int content_len);
 int ucore_send_reply(request_context_t *req_ctx, uint8_t msg_type,
                      const uint8_t *content, size_t content_len);
 
+// Install a transport backend. Must be called before ucore_start().
+// The transport_t is copied into kcontext, so the caller can pass a
+// pointer to a const global vtable exported by the backend.
+void ucore_register_transport(const transport_t *t);
+
 #endif // UCORE_H_

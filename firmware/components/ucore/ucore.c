@@ -17,6 +17,10 @@ QueueHandle_t control_queue;
 // global state of execution environment
 execution_context_t kcontext = {0};
 
+void ucore_register_transport(const transport_t *t) {
+    kcontext.transport = *t;
+}
+
 //helpers
 size_t ucore_uuid(char *uuid_str) {
     uint8_t uuid[16];
