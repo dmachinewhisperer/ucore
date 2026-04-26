@@ -23,3 +23,4 @@ ucore-provisioner = "ukernel.provisioner:UCoreProvisioner"
 
 [tool.setuptools]
 packages = ["ukernel"]
+py-modules = ["ucore_pipes"]
