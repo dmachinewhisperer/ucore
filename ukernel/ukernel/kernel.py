@@ -5,8 +5,12 @@
 # default: execute on local python.  %%ucore magic: execute on device.
 
 import asyncio
+import fcntl
+import json
 import logging
 import os
+import pathlib
+import struct
 import sys
 import uuid
 
@@ -14,6 +18,7 @@ from ipykernel.kernelbase import Kernel
 from jupyter_client import KernelManager
 
 from .agent_client import AgentClient
+from .provisioner import _state_path as _ucore_state_path
 from .transport import create_transport
 
 # Route ucore kernel logs to a stable, readable file. Jupyter captures
@@ -76,6 +81,13 @@ class UCoreKernel(Kernel):
         self._local_kc = None
         # agent
         self._agent = AgentClient()
+        # pipe broadcast: localhost TCP listener that consumers (host-side
+        # Python in the local sub-kernel) connect to and subscribe by
+        # comm_id. JMP_COMM_MSG frames from the device get fanned out to
+        # all subscribers for that comm_id.
+        self._pipe_subscribers: dict[str, set[asyncio.StreamWriter]] = {}
+        self._pipe_server: asyncio.AbstractServer | None = None
+        self._pipe_port: int | None = None
 
     def start(self):
         super().start()
@@ -84,6 +96,7 @@ class UCoreKernel(Kernel):
                  self._serial_baud_rate, _LOG_PATH)
         loop = asyncio.get_event_loop()
         loop.run_until_complete(self._start_local_kernel())
+        loop.run_until_complete(self._start_pipe_listener())
         try:
             loop.run_until_complete(self._connect_transport())
         except Exception as e:
@@ -110,6 +123,110 @@ class UCoreKernel(Kernel):
         self._transport.on_message(self._handle_device_message)
         await self._transport.connect()
         log.info("transport connected (%s)", self._transport_type)
+
+    # ── pipe broadcast (named comm channels) ──────────────────────────
+    #
+    # The kernel runs a localhost TCP listener. Consumers (running in the
+    # local sub-kernel that handles non-magic cells) connect, send a
+    # one-line subscription (b"name\n"), and then receive length-prefixed
+    # chunks (4-byte little-endian length + bytes) for every JMP_COMM_MSG
+    # arriving from the device with that comm_id.
+    #
+    # Multiple subscribers per comm_id are allowed (broadcast). Slow or
+    # disconnected subscribers get dropped without blocking the producer.
+
+    async def _start_pipe_listener(self):
+        self._pipe_server = await asyncio.start_server(
+            self._pipe_client_connected, "127.0.0.1", 0)
+        self._pipe_port = self._pipe_server.sockets[0].getsockname()[1]
+        log.info("pipe listener bound on 127.0.0.1:%d", self._pipe_port)
+        # Publish the port via the provisioner state file so ucore_pipes
+        # consumers can discover where to connect.
+        self._update_state_file({"pipe_port": self._pipe_port})
+
+    async def _pipe_client_connected(self, reader, writer):
+        peer = writer.get_extra_info("peername")
+        try:
+            line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+        except asyncio.TimeoutError:
+            log.warning("pipe subscriber %s did not send subscription line", peer)
+            writer.close()
+            return
+        name = line.decode("utf-8", "replace").strip()
+        if not name:
+            writer.close()
+            return
+        self._pipe_subscribers.setdefault(name, set()).add(writer)
+        log.info("pipe subscriber %s -> %r (total=%d)",
+                 peer, name, len(self._pipe_subscribers[name]))
+        try:
+            # Hold the connection until the peer disconnects. We don't read
+            # anything from subscribers after the subscription line.
+            while True:
+                data = await reader.read(4096)
+                if not data:
+                    break
+        finally:
+            self._pipe_subscribers.get(name, set()).discard(writer)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            log.info("pipe subscriber %s disconnected from %r", peer, name)
+
+    def _dispatch_pipe_message(self, content):
+        name = content.get("comm_id", "")
+        data = content.get("data", b"")
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        subs = self._pipe_subscribers.get(name)
+        if not subs:
+            return
+        header = struct.pack("<I", len(data))
+        dead = []
+        for w in subs:
+            try:
+                w.write(header + data)
+                # fire-and-forget: don't await drain so a slow consumer
+                # can't block the producer. transport buffer absorbs bursts;
+                # if it fills, write() raises and we drop the subscriber.
+            except Exception as e:
+                log.debug("pipe subscriber write failed for %r: %s", name, e)
+                dead.append(w)
+        for d in dead:
+            subs.discard(d)
+            try:
+                d.close()
+            except Exception:
+                pass
+
+    def _update_state_file(self, fields: dict):
+        """Merge `fields` into the provisioner state file under flock."""
+        path = _ucore_state_path()
+        try:
+            with open(path, "r+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    state = json.load(f)
+                except (json.JSONDecodeError, ValueError):
+                    state = {}
+                state.update(fields)
+                f.seek(0)
+                f.truncate()
+                json.dump(state, f)
+                fcntl.flock(f, fcntl.LOCK_UN)
+        except FileNotFoundError:
+            # state file may not exist yet if the provisioner hasn't written
+            # it. Create it minimally so consumers can discover us.
+            try:
+                with open(path, "w") as f:
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    json.dump(fields, f)
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            except OSError as e:
+                log.warning("could not write state file %s: %s", path, e)
+        except OSError as e:
+            log.warning("could not update state file %s: %s", path, e)
 
     async def _ensure_transport(self):
         """Retry the device connect if startup failed or the link dropped.
@@ -254,6 +371,20 @@ class UCoreKernel(Kernel):
     def _handle_device_message(self, msg):
         msg_type = msg.get("header", {}).get("msg_type", "")
         parent_id = msg.get("parent_header", {}).get("msg_id")
+
+        if msg_type == "comm_msg":
+            # Free-running pipe data — broadcast to subscribers, no Jupyter
+            # cell routing involved. A device-side _thread can keep emitting
+            # these long after the originating cell completed.
+            self._dispatch_pipe_message(msg.get("content", {}))
+            return
+
+        if msg_type in ("comm_open", "comm_close"):
+            # Currently informational on the host side; pipe subscribers are
+            # tracked by connection lifetime, not by these JMP messages.
+            log.debug("device %s for comm_id=%r", msg_type,
+                      msg.get("content", {}).get("comm_id"))
+            return
 
         if msg_type in ("stream", "error", "display_data", "execute_result"):
             parent = self._resolve_jupyter_parent(msg)
