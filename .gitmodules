@@ -1,0 +1,3 @@
+[submodule "firmware/components/ucore/micropython"]
+	path = firmware/components/ucore/micropython
+	url = https://github.com/micropython/micropython.git

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 
-set(MICROPY_PORT_DIR ${CMAKE_CURRENT_LIST_DIR}/lib/micropython/ports/esp32)
+set(MICROPY_PORT_DIR ${CMAKE_CURRENT_LIST_DIR}/components/ucore/micropython/ports/esp32)
 
 # Pick a ucore board. Defaults to ESP32_GENERIC; override at configure
 # time with -DMICROPY_BOARD=ESP32_GENERIC_S3 (etc.). Names follow
