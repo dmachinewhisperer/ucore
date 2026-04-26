@@ -44,10 +44,23 @@ def _remove_state():
 
 
 def _pid_alive(pid):
+    """True iff `pid` is a running process. Zombies count as dead.
+
+    `os.kill(pid, 0)` returns success for zombies (they still occupy the
+    process table), which would make us "reuse" a kernel that has already
+    exited and silently send Jupyter the dead kernel's ZMQ ports. Read
+    /proc/<pid>/status and reject any State that isn't running/sleeping/
+    disk-wait/idle.
+    """
     try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    # Z = zombie, X = dead, T = stopped (probably crashed)
+                    state = line.split()[1] if len(line.split()) > 1 else ""
+                    return state not in ("Z", "X", "x")
+        return False
+    except (FileNotFoundError, ProcessLookupError, OSError):
         return False
 
 

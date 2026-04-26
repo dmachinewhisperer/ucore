@@ -16,6 +16,16 @@ from jupyter_client import KernelManager
 from .agent_client import AgentClient
 from .transport import create_transport
 
+# Route ucore kernel logs to a stable, readable file. Jupyter captures
+# stderr per-kernel and rotates aggressively; debugging this kernel
+# end-to-end is much easier with a dedicated log we control.
+_LOG_PATH = os.environ.get("UCORE_LOG", "/tmp/ucore-kernel.log")
+_log_handler = logging.FileHandler(_LOG_PATH, mode="a")
+_log_handler.setFormatter(logging.Formatter(
+    "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.getLogger("ukernel").addHandler(_log_handler)
+logging.getLogger("ukernel").setLevel(logging.DEBUG)
+
 log = logging.getLogger(__name__)
 
 UCORE_MAGIC = "%%ucore"
@@ -59,6 +69,8 @@ class UCoreKernel(Kernel):
         self._transport_type = os.environ.get("UCORE_TRANSPORT", "tcp")
         self._transport_host = os.environ.get("UCORE_HOST", "localhost")
         self._transport_port = int(os.environ.get("UCORE_PORT", "5555"))
+        self._serial_port_path = os.environ.get("UCORE_SERIAL_PORT", "/dev/ttyUSB0")
+        self._serial_baud_rate = int(os.environ.get("UCORE_BAUD_RATE", "115200"))
         # local python kernel
         self._local_km = None
         self._local_kc = None
@@ -67,12 +79,17 @@ class UCoreKernel(Kernel):
 
     def start(self):
         super().start()
+        log.info("ucore kernel starting (transport=%s, serial=%s@%d, log=%s)",
+                 self._transport_type, self._serial_port_path,
+                 self._serial_baud_rate, _LOG_PATH)
         loop = asyncio.get_event_loop()
         loop.run_until_complete(self._start_local_kernel())
         try:
             loop.run_until_complete(self._connect_transport())
-        except Exception:
-            log.warning("device transport not available — %%ucore cells will fail")
+        except Exception as e:
+            log.warning("device transport unavailable at startup: %s: %s — "
+                        "will retry on first %%%%ucore cell",
+                        type(e).__name__, e)
 
     async def _start_local_kernel(self):
         self._local_km = KernelManager(kernel_name="python3")
@@ -87,10 +104,35 @@ class UCoreKernel(Kernel):
             self._transport_type,
             host=self._transport_host,
             port=self._transport_port,
+            port_path=self._serial_port_path,
+            baud_rate=self._serial_baud_rate,
         )
         self._transport.on_message(self._handle_device_message)
         await self._transport.connect()
-        log.info("transport connected")
+        log.info("transport connected (%s)", self._transport_type)
+
+    async def _ensure_transport(self):
+        """Retry the device connect if startup failed or the link dropped.
+
+        Called on each %%ucore cell so a transient device disconnect (e.g.
+        a flash or a USB re-attach) self-heals on the next attempt rather
+        than wedging the kernel until restart.
+        """
+        if self._transport and self._transport.connected:
+            return True
+        if self._transport:
+            try:
+                await self._transport.disconnect()
+            except Exception:
+                log.debug("error closing dead transport", exc_info=True)
+            self._transport = None
+        try:
+            await self._connect_transport()
+            return True
+        except Exception as e:
+            log.warning("transport reconnect failed: %s: %s",
+                        type(e).__name__, e)
+            return False
 
     # ── local python execution ─────────────────────────────────────
 
@@ -99,16 +141,25 @@ class UCoreKernel(Kernel):
             code, silent=silent, store_history=store_history,
             allow_stdin=allow_stdin,
         )
+        log.debug("local exec msg_id=%s parent=%r code=%r",
+                  msg_id, parent.get("msg_id") if isinstance(parent, dict) else parent,
+                  code[:80])
         # proxy iopub messages until we get the execute_reply
         while True:
             try:
                 msg = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: self._local_kc.get_iopub_msg(timeout=30)
                 )
-            except Exception:
+            except Exception as e:
+                log.warning("local exec iopub timeout/error msg_id=%s: %s", msg_id, e)
                 break
 
-            if msg["parent_header"].get("msg_id") != msg_id:
+            ph_msgid = msg["parent_header"].get("msg_id")
+            mtype = msg["header"]["msg_type"]
+            log.debug("local iopub mtype=%s parent_msg_id=%s (target=%s) match=%s",
+                      mtype, ph_msgid, msg_id, ph_msgid == msg_id)
+
+            if ph_msgid != msg_id:
                 continue
 
             msg_type = msg["header"]["msg_type"]
@@ -233,6 +284,9 @@ class UCoreKernel(Kernel):
     # ── publishing to jupyter frontend ──────────────────────────────
 
     def _publish(self, msg_type, content, parent):
+        log.debug("publish iopub mtype=%s parent_type=%s parent_keys=%s",
+                  msg_type, type(parent).__name__,
+                  list(parent.keys()) if isinstance(parent, dict) else None)
         self.session.send(
             self.iopub_socket, msg_type, content,
             parent=parent, ident=None,
@@ -328,10 +382,11 @@ class UCoreKernel(Kernel):
         }
 
     async def _do_execute_device(self, code, silent, store_history, allow_stdin, parent):
-        if not self._transport or not self._transport.connected:
+        if not await self._ensure_transport():
             return self._device_error(
                 "ConnectionError",
-                "Device not connected. Start the simulator or connect the ESP32.",
+                f"Device not connected ({self._transport_type}). "
+                f"Check the link and re-run; see {_LOG_PATH} for details.",
             )
 
         try:
