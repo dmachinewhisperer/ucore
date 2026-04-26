@@ -43,25 +43,38 @@ def _remove_state():
         pass
 
 
-def _pid_alive(pid):
-    """True iff `pid` is a running process. Zombies count as dead.
+def _is_our_kernel(pid):
+    """True iff `pid` is a running ucore kernel process.
 
-    `os.kill(pid, 0)` returns success for zombies (they still occupy the
-    process table), which would make us "reuse" a kernel that has already
-    exited and silently send Jupyter the dead kernel's ZMQ ports. Read
-    /proc/<pid>/status and reject any State that isn't running/sleeping/
-    disk-wait/idle.
+    Checks two things:
+      1. /proc/<pid>/status exists with a State that isn't Z/X (zombie/dead).
+         os.kill(pid, 0) returns success for zombies, which would make us
+         "reuse" a corpse and silently send Jupyter the dead kernel's ZMQ
+         ports — this was the bug behind the no-output symptom.
+      2. /proc/<pid>/cmdline mentions our entry point (`ukernel`). PIDs get
+         reused on long-running systems; without this, a stale state file
+         can cause us to attach to an unrelated process that happens to
+         have the same pid.
     """
     try:
         with open(f"/proc/{pid}/status") as f:
             for line in f:
                 if line.startswith("State:"):
-                    # Z = zombie, X = dead, T = stopped (probably crashed)
-                    state = line.split()[1] if len(line.split()) > 1 else ""
-                    return state not in ("Z", "X", "x")
-        return False
+                    state_chr = line.split()[1] if len(line.split()) > 1 else ""
+                    if state_chr in ("Z", "X", "x"):
+                        return False
+                    break
+            else:
+                return False
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+        return "ukernel" in cmdline
     except (FileNotFoundError, ProcessLookupError, OSError):
         return False
+
+
+# Backwards-compat alias used by older callers.
+_pid_alive = _is_our_kernel
 
 
 class UCoreProvisioner(LocalProvisioner):
