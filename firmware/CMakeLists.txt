@@ -51,20 +51,37 @@ set(EXTRA_COMPONENT_DIRS
     "$ENV{IDF_PATH}/examples/common_components/protocol_examples_common"
 )
 
-# Exclude MicroPython's main.c — ucore provides its own app_main() and mp_task().
-set(MICROPY_COMPONENT_BUILD ON)
-
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(ucore)
+
+# ucore provides its own app_main, mp_task, and esp_native_code_commit
+# in firmware/main/main.c and components/ucore/mpy_bindings.c. MP's port
+# main.c also defines them, so we drop it from mpyruntime's sources to
+# avoid multiple-definition link errors. (MicroPython exposes no flag
+# to suppress its main.c, so we filter at the cmake target level.)
+idf_component_get_property(_mpy_lib mpyruntime COMPONENT_LIB)
+get_property(_mpy_sources TARGET ${_mpy_lib} PROPERTY SOURCES)
+list(FILTER _mpy_sources EXCLUDE REGEX "/ports/esp32/main\\.c$")
+set_property(TARGET ${_mpy_lib} PROPERTY SOURCES ${_mpy_sources})
 
 # mpy_bindings.h declares functions (readline_over_jmp, mpyruntime_log) that
 # the board header's macros redirect to. These need to be visible in
 # MicroPython source files that expand those macros.
 idf_component_get_property(MICROPY_TARGET mpyruntime COMPONENT_LIB)
 if(MICROPY_TARGET)
+    # Force-include mpy_bindings.h so MicroPython sources see the ucore
+    # function decls (mpyruntime_log, readline_over_jmp) that the board
+    # header's macros expand to.
     target_compile_options(${MICROPY_TARGET} PRIVATE
         "-include${CMAKE_CURRENT_LIST_DIR}/components/ucore/include/ucore/mpy_bindings.h"
+    )
+    # Make ucore's public headers resolvable from MicroPython sources so
+    # board headers can `#include "ucore/mpconfig_ucore.h"`. There's no
+    # REQUIRES edge from mpyruntime → ucore (would be a cycle), so the
+    # include path has to be plumbed manually.
+    target_include_directories(${MICROPY_TARGET} PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/components/ucore/include
     )
 else()
     message(FATAL_ERROR "MicroPython target not found")
