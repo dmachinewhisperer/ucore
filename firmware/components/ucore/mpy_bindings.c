@@ -31,6 +31,7 @@
 #include "py/objmodule.h"
 #include "py/runtime.h"
 #include "py/builtin.h"
+#include "py/mperrno.h"
 
 //#include "shared/readline/readline.h"
 #include "shared/runtime/pyexec.h"
@@ -1249,3 +1250,67 @@ esp_err_t __fs_unmount(const char *mount_point){
 }
 
 */
+
+// ── _ucore: built-in module exposing JMP-comm-based pipes ─────────────────
+//
+// Wraps ucore_pipe_*_send so MicroPython code can do:
+//   import _ucore
+//   _ucore.pipe_open("adc")
+//   _ucore.pipe_write("adc", b"3.14")
+//   _ucore.pipe_close("adc")
+// The friendly Pipe class lives in the frozen `ucore` module on top of this.
+
+static mp_obj_t ucore_mod_pipe_open(mp_obj_t name_obj) {
+    size_t name_len;
+    const char *name = mp_obj_str_get_data(name_obj, &name_len);
+    int n = ucore_pipe_open_send(name, name_len);
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ucore_mod_pipe_open_obj, ucore_mod_pipe_open);
+
+static mp_obj_t ucore_mod_pipe_write(mp_obj_t name_obj, mp_obj_t data_obj) {
+    size_t name_len;
+    const char *name = mp_obj_str_get_data(name_obj, &name_len);
+    mp_buffer_info_t buf;
+    mp_get_buffer_raise(data_obj, &buf, MP_BUFFER_READ);
+    // uint16 length cap on the wire — fail fast rather than truncate.
+    if (buf.len > 0xFFFF) {
+        mp_raise_ValueError(MP_ERROR_TEXT("pipe write > 65535 bytes"));
+    }
+    int n = ucore_pipe_write_send(name, name_len,
+                                  (const uint8_t *)buf.buf, buf.len);
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(ucore_mod_pipe_write_obj, ucore_mod_pipe_write);
+
+static mp_obj_t ucore_mod_pipe_close(mp_obj_t name_obj) {
+    size_t name_len;
+    const char *name = mp_obj_str_get_data(name_obj, &name_len);
+    int n = ucore_pipe_close_send(name, name_len);
+    if (n < 0) {
+        mp_raise_OSError(MP_EIO);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ucore_mod_pipe_close_obj, ucore_mod_pipe_close);
+
+static const mp_rom_map_elem_t ucore_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR___name__),    MP_ROM_QSTR(MP_QSTR__ucore) },
+    { MP_ROM_QSTR(MP_QSTR_pipe_open),   MP_ROM_PTR(&ucore_mod_pipe_open_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pipe_write),  MP_ROM_PTR(&ucore_mod_pipe_write_obj) },
+    { MP_ROM_QSTR(MP_QSTR_pipe_close),  MP_ROM_PTR(&ucore_mod_pipe_close_obj) },
+};
+static MP_DEFINE_CONST_DICT(ucore_module_globals, ucore_module_globals_table);
+
+const mp_obj_module_t ucore_module = {
+    .base = { &mp_type_module },
+    .globals = (mp_obj_dict_t *)&ucore_module_globals,
+};
+
+MP_REGISTER_MODULE(MP_QSTR__ucore, ucore_module);

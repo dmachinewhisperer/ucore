@@ -12,6 +12,12 @@ set(MICROPY_PORT_DIR ${CMAKE_CURRENT_LIST_DIR}/micropython/ports/esp32)
 # is read in scope here, before the snapshot.
 list(APPEND MICROPY_CPP_INC_EXTRA ${CMAKE_CURRENT_LIST_DIR}/include)
 
+# mpy_bindings.c contains MP_REGISTER_MODULE for the built-in `_ucore`
+# module; its MP_QSTR_* identifiers must be in MicroPython's qstr table.
+# Add it to MICROPY_SOURCE_QSTR before esp32_common populates that list,
+# so the QSTR preprocessor scans our file too.
+list(APPEND MICROPY_SOURCE_QSTR ${CMAKE_CURRENT_LIST_DIR}/mpy_bindings.c)
+
 include(${MICROPY_PORT_DIR}/esp32_common.cmake)
 # esp32_common.cmake just called idf_component_register; the ucore IDF
 # component now owns all of MP's port sources, and MICROPY_TARGET ==

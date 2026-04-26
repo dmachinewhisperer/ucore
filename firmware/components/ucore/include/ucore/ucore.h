@@ -150,6 +150,14 @@ int ucore_send_async(int msg_type, uint8_t* content, int content_len);
 int ucore_send_reply(request_context_t *req_ctx, uint8_t msg_type,
                      const uint8_t *content, size_t content_len);
 
+// Pipe (named comm channel) helpers. Free-running: do not require an
+// outstanding request context, suitable for use by background MicroPython
+// _thread tasks that emit data after their originating cell completed.
+int ucore_pipe_open_send(const char *comm_id, size_t comm_id_len);
+int ucore_pipe_write_send(const char *comm_id, size_t comm_id_len,
+                          const uint8_t *data, size_t data_len);
+int ucore_pipe_close_send(const char *comm_id, size_t comm_id_len);
+
 // Install a transport backend. Must be called before ucore_start().
 // The transport_t is copied into kcontext, so the caller can pass a
 // pointer to a const global vtable exported by the backend.

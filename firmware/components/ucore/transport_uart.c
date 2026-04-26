@@ -104,11 +104,17 @@ bool uart_status(void *ctx) {
     return uart_is_driver_installed(sctx->uart_port);
 }
 
+// Serializes uart_write_bytes calls so concurrent producers (e.g. the main
+// MicroPython mp_task plus a background _thread emitting pipe data) don't
+// interleave bytes inside a COBS frame. uart_write_bytes is "task-safe" in
+// the no-crash sense, but it does not guarantee atomic delivery of a buffer.
+static SemaphoreHandle_t uart_tx_mutex = NULL;
+
 int uart_bin_tx(void *ctx, uint8_t *payload, int len) {
     if (ctx == NULL || len <= 0 || payload == NULL) return -1;
-    
+
     serial_ctx_t *sctx = (serial_ctx_t *)ctx;
-    
+
     //LOG_HEX(TAG, "TX Decoded:", payload, len);
     uint8_t mtype = get_jmp_msg_type(payload, len);
     ESP_LOGI(TAG, "TX Message Type: %s", jmp_msg_type_to_str(mtype));
@@ -124,13 +130,18 @@ int uart_bin_tx(void *ctx, uint8_t *payload, int len) {
 
     //LOG_HEX(TAG, "TX Encoded:", encoded_data, encoded_size);
 
-    int bytes_written = uart_write_bytes(sctx->uart_port, (const char *)encoded_data, encoded_size);
-    //ESP_LOGI(TAG, "\nuart written bytes: %d\n", bytes_written);
+    int bytes_written;
+    if (uart_tx_mutex) {
+        xSemaphoreTake(uart_tx_mutex, portMAX_DELAY);
+        bytes_written = uart_write_bytes(sctx->uart_port, (const char *)encoded_data, encoded_size);
+        xSemaphoreGive(uart_tx_mutex);
+    } else {
+        bytes_written = uart_write_bytes(sctx->uart_port, (const char *)encoded_data, encoded_size);
+    }
     if (bytes_written < 0) {
         ESP_LOGE(TAG, "UART write failed");
         return -1;
     }
-    
 
     return bytes_written;
 }
@@ -234,6 +245,12 @@ void *uart_connect(void *args) {
     // Lazy-init the binary-log mutex on first connect.
     if (serial_write_mutex == NULL) {
         serial_write_mutex = xSemaphoreCreateMutex();
+    }
+    // Lazy-init the UART TX mutex too — protects whole-frame writes from
+    // interleaving when multiple FreeRTOS tasks (mp_task + MicroPython
+    // _thread tasks) write pipe frames concurrently.
+    if (uart_tx_mutex == NULL) {
+        uart_tx_mutex = xSemaphoreCreateMutex();
     }
 
     // Allocate context

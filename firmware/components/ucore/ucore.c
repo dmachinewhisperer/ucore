@@ -8,6 +8,7 @@
 
 #include "ucore/ucore.h"
 #include "ucore/jmp_bin.h"
+#include "ucore/utils.h"
 
 QueueHandle_t stdin_queue;
 QueueHandle_t ucore_queue;
@@ -102,6 +103,65 @@ int ucore_send_async(int msg_type, uint8_t* content, int content_len){
     return len;
 }
 
+// ── Pipe (named comm channel) senders ──────────────────────────────────
+//
+// Each helper serializes the appropriate JMP comm message and ships it via
+// ucore_send_async, which builds a free-running JMP frame (no parent cell
+// context required) and writes it directly to the transport. Suitable for
+// use from MicroPython _thread tasks that outlive the originating cell.
+
+int ucore_pipe_open_send(const char *comm_id, size_t comm_id_len) {
+    jmp_comm_open_t msg = {
+        .comm_id_len = (uint16_t)comm_id_len,
+        .comm_id = (uint8_t *)comm_id,
+        .target_id = 0,
+    };
+    size_t content_max = 4 + comm_id_len;
+    uint8_t *content = malloc(content_max);
+    if (!content) return -1;
+    size_t content_len = 0;
+    int ret = jmp_serialize_comm_open(content, content_max, &msg, &content_len);
+    if (ret != BINRPC_OK) { free(content); return -1; }
+    int n = ucore_send_async(JMP_COMM_OPEN, content, content_len);
+    free(content);
+    return n;
+}
+
+int ucore_pipe_write_send(const char *comm_id, size_t comm_id_len,
+                          const uint8_t *data, size_t data_len) {
+    jmp_comm_msg_t msg = {
+        .comm_id_len = (uint16_t)comm_id_len,
+        .comm_id = (uint8_t *)comm_id,
+        .data_len = (uint16_t)data_len,
+        .data = (uint8_t *)data,
+    };
+    size_t content_max = 4 + comm_id_len + data_len;
+    uint8_t *content = malloc(content_max);
+    if (!content) return -1;
+    size_t content_len = 0;
+    int ret = jmp_serialize_comm_msg(content, content_max, &msg, &content_len);
+    if (ret != BINRPC_OK) { free(content); return -1; }
+    int n = ucore_send_async(JMP_COMM_MSG, content, content_len);
+    free(content);
+    return n;
+}
+
+int ucore_pipe_close_send(const char *comm_id, size_t comm_id_len) {
+    jmp_comm_close_t msg = {
+        .comm_id_len = (uint16_t)comm_id_len,
+        .comm_id = (uint8_t *)comm_id,
+    };
+    size_t content_max = 2 + comm_id_len;
+    uint8_t *content = malloc(content_max);
+    if (!content) return -1;
+    size_t content_len = 0;
+    int ret = jmp_serialize_comm_close(content, content_max, &msg, &content_len);
+    if (ret != BINRPC_OK) { free(content); return -1; }
+    int n = ucore_send_async(JMP_COMM_CLOSE, content, content_len);
+    free(content);
+    return n;
+}
+
 // sends status but does not depend on iopub task
 void ucore_update_status(uint8_t execution_state, request_context_t *pctx){
     // note that max_len is not necessarily the size of jmp_status_t that we know of
@@ -184,58 +244,87 @@ void ucore_register_comm_task(int request_type, TaskFunction_t task_function, co
 // are not serviced between status busy and idle. need to stop this spamming at the relay server
 // note: this task needs to run with a very high relative priority so that it can preempt
 // main execution threads as it publishes side effects these threads emit
-void iopub_task(){
-    queue_pkt_t pkt = {0}; 
+// True if msg_type is a "free-running" message that does not require an
+// outstanding request context (e.g., comm pipe data emitted by a
+// background _thread on the device after the originating cell completed).
+static inline bool _is_free_running(uint8_t msg_type) {
+    return msg_type == JMP_COMM_MSG
+        || msg_type == JMP_COMM_OPEN
+        || msg_type == JMP_COMM_CLOSE;
+}
 
-    // we expect from the queue pkt.payload to be a heap allocated content of the 
+void iopub_task(){
+    queue_pkt_t pkt = {0};
+
+    // we expect from the queue pkt.payload to be a heap allocated content of the
     // iopub msg, with lenght stored in pkt.payload_len and msg_type in pkt.payload_tag
     while(xQueueReceive(iopub_queue, &pkt, portMAX_DELAY) == pdTRUE){
-        if(!kcontext.current_req){
-            // if there is not outstanding request, side effects and statuses should not fire
-            //ESP_LOGE(TAG, "kcontext.current_req is null");
+        bool free_running = _is_free_running(pkt.payload_tag);
+        if(!kcontext.current_req && !free_running){
+            // No outstanding request: side effects and statuses cannot route
+            // to a specific cell, so drop them. Pipe traffic (COMM_*) is the
+            // exception — it's intentionally decoupled from cell context.
             goto loop_cleanup;
         }
 
-        size_t header_len = 0, offset = 0, max_len = 0; 
-        max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t) + 2 * UCORE_MAX_ID_LEN +
-                    kcontext.current_req->msg->header_len + pkt.payload_len; 
+        // Pull cell context if available; otherwise synthesize empty fields.
+        const uint8_t *parent_header = kcontext.current_req
+            ? kcontext.current_req->msg->header : NULL;
+        uint8_t parent_header_len = kcontext.current_req
+            ? kcontext.current_req->msg->header_len : 0;
+        const uint8_t *sans_prefix = kcontext.current_req
+            ? kcontext.current_req->payload : NULL;
+        uint16_t session_id_len = kcontext.current_req
+            ? kcontext.current_req->header->session_id_len : 0;
+        uint8_t *session_id = kcontext.current_req
+            ? kcontext.current_req->header->session_id : NULL;
+
+        size_t header_len = 0, offset = 0, max_len = 0;
+        max_len = UCORE_SANS_PREFIX_LEN + JMP_MSG_PREFIX_LEN + sizeof(jmp_header_t)
+                + 2 * UCORE_MAX_ID_LEN + parent_header_len + pkt.payload_len;
 
         uint8_t *payload = malloc(max_len);
         if (!payload) {
             goto loop_cleanup;
         }
-        
+
         char uuid[UCORE_MAX_ID_LEN];
         jmp_header_t header = {
             .msg_id_len = (uint16_t)ucore_uuid(uuid),
             .msg_id = (uint8_t*)uuid,
-            .session_id_len = kcontext.current_req->header->session_id_len,
-            .session_id = kcontext.current_req->header->session_id, 
+            .session_id_len = session_id_len,
+            .session_id = session_id,
             .username_len = 0,
             .username = NULL,
             .msg_type = pkt.payload_tag,
             .version = UCORE_KERNEL_JMP_VERSION,
         };
 
-        offset += UCORE_SANS_PREFIX_LEN; 
+        offset += UCORE_SANS_PREFIX_LEN;
         offset +=JMP_MSG_PREFIX_LEN;
         jmp_serialize_header(payload + offset, max_len - offset, &header, &header_len);
-        offset += header_len; 
+        offset += header_len;
 
-        memcpy(payload + offset, kcontext.current_req->msg->header, kcontext.current_req->msg->header_len);
-        offset += kcontext.current_req->msg->header_len;
+        if (parent_header_len > 0) {
+            memcpy(payload + offset, parent_header, parent_header_len);
+            offset += parent_header_len;
+        }
 
         memcpy(payload + offset, pkt.payload, pkt.payload_len);
         offset += pkt.payload_len;
 
-        jmp_add_msg_prefix(payload + UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN, header_len, kcontext.current_req->msg->header_len, 0, pkt.payload_len, 0);
-        memcpy(payload, kcontext.current_req->payload, UCORE_SANS_PREFIX_LEN);
+        jmp_add_msg_prefix(payload + UCORE_SANS_PREFIX_LEN, JMP_MSG_PREFIX_LEN,
+                           header_len, parent_header_len, 0, pkt.payload_len, 0);
+        if (sans_prefix) {
+            memcpy(payload, sans_prefix, UCORE_SANS_PREFIX_LEN);
+        } else {
+            memset(payload, 0, UCORE_SANS_PREFIX_LEN);
+        }
 
-        
         kcontext.transport.bin_tx(kcontext.transport_ctx, payload, offset);
         free(payload);
 
-loop_cleanup:        
+loop_cleanup:
         if(pkt.payload) free(pkt.payload);
         pkt.payload = NULL;
     }
@@ -553,9 +642,18 @@ static void handle_comm_msg(request_context_t *req_ctx) {
     for(int i = 0; i < UCORE_MAX_COMM_TASKS; i++){
         if(kcontext.comms_tasks[i].comm_open.comm_id_len == comm_msg.comm_id_len &&
            memcmp(kcontext.comms_tasks[i].comm_open.comm_id, comm_msg.comm_id, comm_msg.comm_id_len) == 0){
-            if(comm_msg.data > 0){
-                //filter out comm_msg.data == 0 which is reserved for exit
-                xTaskNotify(kcontext.comms_tasks[i].instance_handle, comm_msg.data, eSetValueWithOverwrite);
+            // jmp_comm_msg_t.data is now variable-length bytes (was uint32 in
+            // the old wire format). For host→device notify-style messages,
+            // interpret the first 4 bytes as a big-endian uint32 if present.
+            if (comm_msg.data_len >= 4) {
+                uint32_t v = ((uint32_t)comm_msg.data[0] << 24)
+                           | ((uint32_t)comm_msg.data[1] << 16)
+                           | ((uint32_t)comm_msg.data[2] << 8)
+                           |  (uint32_t)comm_msg.data[3];
+                if (v > 0) {
+                    // 0 reserved for exit
+                    xTaskNotify(kcontext.comms_tasks[i].instance_handle, v, eSetValueWithOverwrite);
+                }
             }
             break;
         }
