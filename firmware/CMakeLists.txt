@@ -2,10 +2,12 @@ cmake_minimum_required(VERSION 3.12)
 
 set(MICROPY_PORT_DIR ${CMAKE_CURRENT_LIST_DIR}/lib/micropython/ports/esp32)
 
-# Use the ucore custom board definition.
-# The board config header (mpconfigboard.h) carries all MicroPython overrides
-# that ucore needs (stdout redirect, readline redirect, disabled peripherals).
-set(MICROPY_BOARD UCORE_ESP32)
+# Pick a ucore board. Defaults to ESP32_GENERIC; override at configure
+# time with -DMICROPY_BOARD=ESP32_GENERIC_S3 (etc.). Names follow
+# MicroPython port board conventions.
+if(NOT DEFINED MICROPY_BOARD)
+    set(MICROPY_BOARD ESP32_GENERIC)
+endif()
 set(MICROPY_BOARD_DIR ${CMAKE_CURRENT_LIST_DIR}/boards/${MICROPY_BOARD})
 
 if(NOT EXISTS ${MICROPY_BOARD_DIR}/mpconfigboard.cmake)
