@@ -279,11 +279,7 @@ int iopub_print(const char *text, int text_len){
         .text = text,
     };
     int ret_val = jmp_serialize_stream(content, max_len, &stream, &content_len);
-
-    printf("content_len=%d, text_len=%d, ret_val=%d, text=", content_len, text_len, ret_val);
-    for(int i = 0; i<text_len; i++){
-        printf("%c", text[i]);
-    }
+    (void)ret_val;
 
     queue_pkt_t spkt = {
         .payload = (void*)content,

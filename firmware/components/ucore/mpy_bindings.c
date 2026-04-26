@@ -397,14 +397,6 @@ static mp_obj_t ucore_repl_print(mp_obj_t obj) {
         return mp_const_none;
     }
 
-    // Unconditionally log for now to debug why it's not firing
-    vstr_t vstr;
-    mp_print_t print;
-    vstr_init_print(&vstr, 32, &print);
-    mp_obj_print_helper(&print, obj, PRINT_REPR);
-    printf("DEBUG: ucore_repl_print object: %s\n", vstr_str(&vstr));
-    vstr_clear(&vstr);
-
     ucore_last_result = obj;
     return mp_const_none;
 }
@@ -426,7 +418,6 @@ typedef enum {
 static MP_DEFINE_CONST_FUN_OBJ_1(ucore_repl_print_obj, ucore_repl_print);
 
 int execute_str(const char *source, int len, jmp_error_t *err) {
-    printf("DEBUG: execute_str source='%.*s' (len=%d)\n", len, source, len);
     memset(err, 0, sizeof(jmp_error_t));
     
     mp_lexer_t *lex = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, source, len, 0);
@@ -486,10 +477,6 @@ int execute_str(const char *source, int len, jmp_error_t *err) {
                 }
             }
             has_preamble = (non_nl_count >= 2 && last_stmt_line > 1);
-            printf("DEBUG: file_input_2: %d non-NL nodes, last_stmt_line=%d, has_preamble=%d\n",
-                   non_nl_count, (int)last_stmt_line, (int)has_preamble);
-        } else {
-            printf("DEBUG: single statement (no file_input_2)\n");
         }
 
         // Free the FILE_INPUT parse tree - we'll re-parse from source
@@ -497,7 +484,6 @@ int execute_str(const char *source, int len, jmp_error_t *err) {
 
         if (!has_preamble) {
             // Single statement (or couldn't split): parse entire source as SINGLE_INPUT
-            printf("DEBUG: Parsing entire source as SINGLE_INPUT\n");
             mp_lexer_t *lex2 = mp_lexer_new_from_str_len(MP_QSTR__lt_stdin_gt_, source, len, 0);
             mp_parse_tree_t pt = mp_parse(lex2, MP_PARSE_SINGLE_INPUT);
             mp_obj_t fun = mp_compile(&pt, MP_QSTR__lt_stdin_gt_, true);
@@ -514,9 +500,6 @@ int execute_str(const char *source, int len, jmp_error_t *err) {
             size_t preamble_len = p - source;
             const char *last_src = p;
             size_t last_len = len - preamble_len;
-
-            printf("DEBUG: Splitting at line %d (preamble=%d bytes, last=%d bytes)\n",
-                   (int)last_stmt_line, (int)preamble_len, (int)last_len);
 
             // Execute preamble as FILE_INPUT (no REPL behavior)
             if (preamble_len > 0) {
@@ -697,9 +680,7 @@ static bool handle_execute_request(request_context_t *req_ctx) {
     kcontext.execution_count++;
 
     // Dispatch execute_result if we have a captured object
-    printf("DEBUG: Finishing execution, exit_code=%d, ucore_last_result=%p\n", exit_code, (void*)ucore_last_result);
     if (exit_code == __PYEXEC_SUCCESS && ucore_last_result != MP_OBJ_NULL) {
-        printf("DEBUG: Attempting to send execute_result message\n");
         vstr_t vstr;
         mp_print_t print;
         vstr_init_print(&vstr, 64, &print);
