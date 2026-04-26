@@ -257,13 +257,18 @@ void *uart_connect(void *args) {
         return NULL;
     }
     
-    // Configure UART parameters
+    // Configure UART parameters.
+    // Hardware flow control stays disabled: the USB-to-UART bridges on
+    // common esp32 dev boards (CP2102, CH340, CH343) don't drive the
+    // chip's CTS pin, so HW flow control would block all TX waiting for
+    // an asserted CTS that never comes. COBS framing on top tolerates
+    // dropped bytes per frame; we don't need link-level flow control.
     uart_config_t uart_config = {
         .baud_rate = UART_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
         .parity    = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
     err = uart_param_config(sctx->uart_port, &uart_config);
