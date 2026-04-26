@@ -37,11 +37,16 @@ void app_main(void)
     // Pick a transport backend and start ucore.
     ucore_register_transport(&ucore_transport_uart);
 
-    // logs flow on uart0 so we need to move the app link to uart1 for qemu emulation
-    // for emulation uart0 is attached to mon:stdio while uart1 attaches to a tcp socket
-    // during actual running we have to use uart0 as its exposed over the usb
+    // UART0 is the line wired to the dev kit's USB-to-UART bridge — the
+    // actual port we talk to from the host. It's also the line ESP-IDF's
+    // own logs print on, so log output and JMP frames will share the wire
+    // when this firmware runs on real hardware.
+    //
+    // QEMU note: for emulation, UART0 is attached to mon:stdio while
+    // UART1 attaches to a TCP socket. The emulation path will need to
+    // override this back to UART_NUM_1 (or pick a transport at runtime).
     ucore_start(&(ucore_uart_config_t){
-        .uart_port_no = UART_NUM_1,
+        .uart_port_no = UART_NUM_0,
     });
     
 
