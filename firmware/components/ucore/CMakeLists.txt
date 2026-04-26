@@ -59,10 +59,11 @@ target_compile_options(${MICROPY_TARGET} PRIVATE
 # through MP's mpconfigport.h → board mpconfigboard.h → ucore/mpconfig_ucore.h.
 # tinyusb is a separate managed component — it doesn't inherit ucore's
 # PUBLIC includes (it's our dependency, not our dependent). Plumb the
-# include path explicitly when the tinyusb target is in the build.
-idf_component_get_property(_tusb_lib espressif__tinyusb COMPONENT_LIB)
-if(_tusb_lib)
-    target_include_directories(${_tusb_lib} PRIVATE
+# include path explicitly when tinyusb is actually in the build.
+# (idf_component.yml only pulls it for esp32s2/s3/p4, so the target won't
+# exist on classic esp32 / c-series builds.)
+if(TARGET __idf_espressif__tinyusb)
+    target_include_directories(__idf_espressif__tinyusb PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/include
     )
 endif()

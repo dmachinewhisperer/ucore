@@ -53,4 +53,30 @@ macro(ucore_setup)
         ${CMAKE_BINARY_DIR}/sdkconfig.combined
         COPYONLY)
     set(SDKCONFIG_DEFAULTS ${CMAKE_BINARY_DIR}/sdkconfig.combined)
+
+    # Bake board.md into the firmware as a frozen `ucore` Python module so
+    # an agent can do `import ucore; print(ucore.INFO)` to learn the
+    # platform without guessing pin numbers from the chip name.
+    if(EXISTS ${MICROPY_BOARD_DIR}/board.md)
+        file(READ ${MICROPY_BOARD_DIR}/board.md _UCORE_BOARD_INFO)
+        # Re-run cmake when board.md changes so the frozen content stays
+        # in sync. (configure_file already tracks ucore.py.in itself.)
+        set_property(DIRECTORY APPEND PROPERTY
+            CMAKE_CONFIGURE_DEPENDS ${MICROPY_BOARD_DIR}/board.md)
+    else()
+        set(_UCORE_BOARD_INFO "(no board.md provided for ${MICROPY_BOARD})")
+    endif()
+    configure_file(
+        ${_UCORE_COMPONENT_DIR}/ucore.py.in
+        ${CMAKE_BINARY_DIR}/ucore.py
+        @ONLY)
+
+    # Wrap the selected MICROPY_FROZEN_MANIFEST so our generated ucore.py
+    # is included as a frozen module on top of whatever the board / port
+    # default already freezes.
+    file(WRITE ${CMAKE_BINARY_DIR}/ucore_manifest.py
+"include(\"${MICROPY_FROZEN_MANIFEST}\")
+module(\"ucore.py\", base_path=\"${CMAKE_BINARY_DIR}\")
+")
+    set(MICROPY_FROZEN_MANIFEST ${CMAKE_BINARY_DIR}/ucore_manifest.py)
 endmacro()
