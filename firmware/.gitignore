@@ -3,7 +3,6 @@ binutils
 build
 lib
 managed_components
-partitions-*
 devdocs
 upip
 older

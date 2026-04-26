@@ -31,9 +31,17 @@ elseif (NOT MICROPY_FROZEN_MANIFEST)
 endif()
 
 # Concatenate all sdkconfig files into a combined one for the IDF to use.
+# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME values from MicroPython's fragments
+# are relative to project root, but the CSVs live under MICROPY_PORT_DIR.
+# Rewrite any relative path to an absolute one under MICROPY_PORT_DIR so IDF
+# resolves them in place — no need to copy CSVs into the project root.
 file(WRITE ${CMAKE_BINARY_DIR}/sdkconfig.combined.in "")
 foreach(SDKCONFIG_DEFAULT ${SDKCONFIG_DEFAULTS})
     file(READ ${MICROPY_PORT_DIR}/${SDKCONFIG_DEFAULT} CONTENTS)
+    string(REGEX REPLACE
+        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"([^/\"][^\"]*)\""
+        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"${MICROPY_PORT_DIR}/\\1\""
+        CONTENTS "${CONTENTS}")
     file(APPEND ${CMAKE_BINARY_DIR}/sdkconfig.combined.in "${CONTENTS}")
 endforeach()
 configure_file(${CMAKE_BINARY_DIR}/sdkconfig.combined.in ${CMAKE_BINARY_DIR}/sdkconfig.combined COPYONLY)
