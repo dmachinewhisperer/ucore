@@ -19,8 +19,7 @@
 
 #include "ucore/ucore.h"
 #include "ucore/mpy_bindings.h"
-
-#include "hal_esp32.h"
+#include "ucore/transport_uart.h"
 
 
 static const char *TAG = "main";
@@ -47,14 +46,13 @@ void app_main(void)
      */
     //ESP_ERROR_CHECK(example_connect());
 
-    //register port dependent handlers
-    platform_init();
+    // Pick a transport backend and start ucore.
+    ucore_register_transport(&ucore_transport_uart);
 
-    //start the ucore service
-    ucore_start(&(transport_args_t){
-        // logs flow on uart0 so we need to move the app link to uart1 for qemu emulation
-        // for emuation uart0 is attached to  mon:stdio while uart1 attaches to a tcp socket
-        // during actual running we have to use uart0 as its exposed over the usb 
+    // logs flow on uart0 so we need to move the app link to uart1 for qemu emulation
+    // for emulation uart0 is attached to mon:stdio while uart1 attaches to a tcp socket
+    // during actual running we have to use uart0 as its exposed over the usb
+    ucore_start(&(ucore_uart_config_t){
         .uart_port_no = UART_NUM_1,
     });
     

@@ -12,17 +12,16 @@
 
 #include "ucore/ucore.h"
 #include "ucore/utils.h"
-
-#include "hal_esp32.h"
+#include "ucore/transport_uart.h"
 
 
 //#define LOG_HEX(tag, msg, buf, len) ((void)0)
 
-//this lock is used for guarding against context switch when we are 
+//this lock is used for guarding against context switch when we are
 // logging a buffer from another task. interleaving jumbles up the logs without it
 
 
-static const char *TAG = "hal_esp32";
+static const char *TAG = "ucore_uart";
 
 // Serial transport implementation
 #define INITIAL_ACCUMULATOR_LEN 256
@@ -99,13 +98,13 @@ typedef struct {
 
 static serial_ctx_t *g_serial_ctx = NULL;
 
-bool esp32_serial_status(void *ctx) {
+bool uart_status(void *ctx) {
     if (ctx == NULL) return false;
     serial_ctx_t *sctx = (serial_ctx_t *)ctx;
     return uart_is_driver_installed(sctx->uart_port);
 }
 
-int esp32_serial_bin_tx(void *ctx, uint8_t *payload, int len) {
+int uart_bin_tx(void *ctx, uint8_t *payload, int len) {
     if (ctx == NULL || len <= 0 || payload == NULL) return -1;
     
     serial_ctx_t *sctx = (serial_ctx_t *)ctx;
@@ -136,7 +135,7 @@ int esp32_serial_bin_tx(void *ctx, uint8_t *payload, int len) {
     return bytes_written;
 }
 
-void serial_task(void *pvParameters) {
+static void uart_rx_task(void *pvParameters) {
     serial_ctx_t *sctx = (serial_ctx_t *)pvParameters;
     int acc_idx = 0;
     size_t buf_len = 0;
@@ -231,7 +230,12 @@ void serial_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-void *esp32_serial_connect(void *args) {
+void *uart_connect(void *args) {
+    // Lazy-init the binary-log mutex on first connect.
+    if (serial_write_mutex == NULL) {
+        serial_write_mutex = xSemaphoreCreateMutex();
+    }
+
     // Allocate context
     serial_ctx_t *sctx = malloc(sizeof(serial_ctx_t));
     if (sctx == NULL) {
@@ -239,7 +243,7 @@ void *esp32_serial_connect(void *args) {
         return NULL;
     }
     
-    sctx->uart_port = ((transport_args_t *)args)->uart_port_no;
+    sctx->uart_port = ((ucore_uart_config_t *)args)->uart_port_no;
 
     sctx->serial_task_handle = NULL;
 
@@ -272,11 +276,11 @@ void *esp32_serial_connect(void *args) {
 
     // Start serial task
     BaseType_t task_created = xTaskCreate(
-        serial_task, 
-        "serial_task", 
-        4096, 
-        sctx, 
-        5, 
+        uart_rx_task,
+        "ucore_uart_rx",
+        4096,
+        sctx,
+        5,
         &sctx->serial_task_handle
     );
     
@@ -292,7 +296,7 @@ void *esp32_serial_connect(void *args) {
     return sctx;
 }
 
-void esp32_serial_disconnect(void *ctx) {
+void uart_disconnect(void *ctx) {
     if (ctx == NULL) return;
     
     serial_ctx_t *sctx = (serial_ctx_t *)ctx;
@@ -314,11 +318,11 @@ void esp32_serial_disconnect(void *ctx) {
     ESP_LOGI(TAG, "Serial transport disconnected");
 }
 
-void esp32_serial_stop(void *ctx) {
-    esp32_serial_disconnect(ctx);
+void uart_stop(void *ctx) {
+    uart_disconnect(ctx);
 }
 
-void esp32_comm_notification_task(void *pvParameters) {
+void comm_notification_task(void *pvParameters) {
     comms_task_map_t *comm_map = NULL;
     for (int i = 0; i < UCORE_MAX_COMM_TASKS; i++) {
         if (kcontext.comms_tasks[i].request_type == UCORE_COMMS_NOTIFICATION) {
@@ -361,16 +365,10 @@ void esp32_comm_notification_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-static transport_t serial_transport = {
-    .connect    = esp32_serial_connect,
-    .status     = esp32_serial_status,
-    .bin_tx     = esp32_serial_bin_tx,
-    .disconnect = esp32_serial_disconnect,
-    .stop       = esp32_serial_stop
+const transport_t ucore_transport_uart = {
+    .connect    = uart_connect,
+    .status     = uart_status,
+    .bin_tx     = uart_bin_tx,
+    .disconnect = uart_disconnect,
+    .stop       = uart_stop
 };
-
-void platform_init(void) {    
-    serial_write_mutex = xSemaphoreCreateMutex();
-    kcontext.transport = serial_transport;
-    kcontext.transport_ctx = NULL;
-}

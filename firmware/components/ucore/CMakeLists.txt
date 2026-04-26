@@ -3,6 +3,7 @@ list(APPEND UCORE_SRCS
     "ucore.c"
     "jmp_bin.c"
     "utils.c"
+    "transport_uart.c"
 )
 
 

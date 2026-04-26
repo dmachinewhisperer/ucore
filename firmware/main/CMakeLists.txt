@@ -1,3 +1,3 @@
 idf_component_register(
-    SRCS "main.c" "hal_esp32.c"
+    SRCS "main.c"
     INCLUDE_DIRS ".")
