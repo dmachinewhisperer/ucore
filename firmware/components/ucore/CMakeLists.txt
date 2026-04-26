@@ -54,3 +54,15 @@ set_property(TARGET ${MICROPY_TARGET} PROPERTY SOURCES ${_srcs})
 target_compile_options(${MICROPY_TARGET} PRIVATE
     "-include${CMAKE_CURRENT_LIST_DIR}/include/ucore/mpy_bindings.h"
 )
+
+# On targets with native USB (S2/S3/P4), MP routes tinyusb's tusb_config.h
+# through MP's mpconfigport.h → board mpconfigboard.h → ucore/mpconfig_ucore.h.
+# tinyusb is a separate managed component — it doesn't inherit ucore's
+# PUBLIC includes (it's our dependency, not our dependent). Plumb the
+# include path explicitly when the tinyusb target is in the build.
+idf_component_get_property(_tusb_lib espressif__tinyusb COMPONENT_LIB)
+if(_tusb_lib)
+    target_include_directories(${_tusb_lib} PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/include
+    )
+endif()
