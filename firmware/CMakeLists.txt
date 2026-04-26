@@ -8,7 +8,7 @@ set(MICROPY_PORT_DIR ${CMAKE_CURRENT_LIST_DIR}/lib/micropython/ports/esp32)
 if(NOT DEFINED MICROPY_BOARD)
     set(MICROPY_BOARD ESP32_GENERIC)
 endif()
-set(MICROPY_BOARD_DIR ${CMAKE_CURRENT_LIST_DIR}/boards/${MICROPY_BOARD})
+set(MICROPY_BOARD_DIR ${CMAKE_CURRENT_LIST_DIR}/components/ucore/boards/${MICROPY_BOARD})
 
 if(NOT EXISTS ${MICROPY_BOARD_DIR}/mpconfigboard.cmake)
     message(FATAL_ERROR "Invalid MICROPY_BOARD specified: ${MICROPY_BOARD}")
