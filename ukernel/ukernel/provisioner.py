@@ -11,6 +11,12 @@ from jupyter_client.provisioning import LocalProvisioner
 
 STATE_FILENAME = ".ucore_kernel_state.json"
 
+# Fields that outlive any single kernel process. The user's chosen device,
+# pipe-port reservation, etc. must survive shutdown so a fresh kernel can
+# read them on the next launch. Lifecycle fields (pid, connection_info,
+# clients) get cleared by _clear_lifecycle().
+_PERSISTENT_FIELDS = ("selected_device",)
+
 
 def _state_path():
     return pathlib.Path(__file__).resolve().parent.parent / STATE_FILENAME
@@ -29,6 +35,7 @@ def _read_state():
 
 
 def _write_state(state):
+    """Replace the whole state dict (lifecycle write)."""
     p = _state_path()
     with open(p, "w") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -36,11 +43,43 @@ def _write_state(state):
         fcntl.flock(f, fcntl.LOCK_UN)
 
 
+def _merge_state(updates):
+    """Read-modify-write merge of `updates` into the state file under
+    flock. Safe to call concurrently with the kernel's own writes."""
+    p = _state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # Open r+ if it exists, else create fresh.
+    mode = "r+" if p.exists() else "w+"
+    with open(p, mode) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            try:
+                state = json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                state = {}
+            state.update(updates)
+            f.seek(0)
+            f.truncate()
+            json.dump(state, f)
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def _remove_state():
-    try:
-        _state_path().unlink()
-    except FileNotFoundError:
-        pass
+    """Drop lifecycle fields but keep persistent ones (selected_device,
+    user preferences). When nothing persistent remains, delete the file."""
+    state = _read_state()
+    if not state:
+        return
+    persistent = {k: state[k] for k in _PERSISTENT_FIELDS if k in state}
+    if persistent:
+        _write_state(persistent)
+    else:
+        try:
+            _state_path().unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _is_our_kernel(pid):
@@ -83,7 +122,7 @@ class UCoreProvisioner(LocalProvisioner):
     async def pre_launch(self, **kwargs):
         state = _read_state()
 
-        if state and _pid_alive(state["pid"]):
+        if state and state.get("pid") and _pid_alive(state["pid"]):
             # Kernel already running — override KernelManager's ports
             # BEFORE the base class writes the connection file
             km = self.parent
@@ -105,7 +144,7 @@ class UCoreProvisioner(LocalProvisioner):
     async def launch_kernel(self, cmd, **kwargs):
         state = getattr(self, "_reuse_state", None)
 
-        if state and _pid_alive(state["pid"]):
+        if state and state.get("pid") and _pid_alive(state["pid"]):
             # Attach to existing kernel — don't spawn a new process
             self._is_reused = True
             self.pid = state["pid"]
@@ -122,7 +161,8 @@ class UCoreProvisioner(LocalProvisioner):
 
             return self.connection_info
 
-        # First notebook — launch the kernel process
+        # First notebook — launch the kernel process. Merge instead of
+        # overwrite so persistent fields (selected_device, etc.) survive.
         conn_info = await super().launch_kernel(cmd, **kwargs)
 
         serializable_info = {
@@ -130,7 +170,7 @@ class UCoreProvisioner(LocalProvisioner):
             for k, v in conn_info.items()
         }
 
-        _write_state({
+        _merge_state({
             "pid": self.pid,
             "pgid": self.pgid,
             "connection_info": serializable_info,
