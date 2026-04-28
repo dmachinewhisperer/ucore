@@ -75,7 +75,7 @@ class UCoreKernel(Kernel):
         self._transport_type = os.environ.get("UCORE_TRANSPORT", "tcp")
         self._transport_host = os.environ.get("UCORE_HOST", "localhost")
         self._transport_port = int(os.environ.get("UCORE_PORT", "5555"))
-        self._serial_port_path = os.environ.get("UCORE_SERIAL_PORT", "/dev/ttyUSB0")
+        self._serial_port_path = self._resolve_serial_port()
         self._serial_baud_rate = int(os.environ.get("UCORE_BAUD_RATE", "115200"))
         # local python kernel
         self._local_km = None
@@ -143,6 +143,38 @@ class UCoreKernel(Kernel):
         self._transport.on_disconnect(self._on_transport_disconnect)
         await self._transport.connect()
         log.info("transport connected (%s)", self._transport_type)
+
+    def _resolve_serial_port(self) -> str:
+        """Pick the serial device this kernel will attach to.
+
+        Precedence: explicit env override > selection persisted by the
+        sidebar > probe-pick-first JMP-speaking device on the bus. The
+        last fallback is "/dev/ttyUSB0" so a kernel started on a system
+        with no serial devices fails predictably rather than at random.
+        """
+        env_port = os.environ.get("UCORE_SERIAL_PORT")
+        if env_port:
+            return env_port
+
+        from .provisioner import _read_state
+        state = _read_state() or {}
+        selected = state.get("selected_device")
+        if selected:
+            from .devices import enumerate_devices
+            for d in enumerate_devices():
+                if d.id == selected or d.path == selected:
+                    return d.path
+            log.warning("selected_device %r not present; falling back", selected)
+
+        from .devices import enumerate_devices, probe_jmp
+        for d in enumerate_devices():
+            if d.kind == "unknown":
+                continue
+            probe_jmp(d)
+            if d.speaks_jmp:
+                log.info("auto-attached to %s (%s)", d.path, d.kind)
+                return d.path
+        return "/dev/ttyUSB0"
 
     def _on_transport_disconnect(self, reason: str):
         """Fail every in-flight request so cells error out instead of hanging
