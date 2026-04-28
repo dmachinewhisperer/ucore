@@ -1,0 +1,7 @@
+{
+  "ServerApp": {
+    "jpserver_extensions": {
+      "ukernel.server_extension": true
+    }
+  }
+}
