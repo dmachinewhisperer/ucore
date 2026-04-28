@@ -1008,10 +1008,16 @@ soft_reset:
     */
 // main task logic
     
-    queue_pkt_t pkt = {0}; 
+    queue_pkt_t pkt = {0};
     while (1) {
         pkt.payload = NULL;
-        if (xQueueReceive(mpyruntime_queue, &pkt, portMAX_DELAY) == pdTRUE) {   
+        // Release the MicroPython GIL while blocked waiting for the next
+        // request — otherwise background _thread tasks (e.g. pipe producers)
+        // are starved between cells and can never run.
+        MP_THREAD_GIL_EXIT();
+        BaseType_t got = xQueueReceive(mpyruntime_queue, &pkt, portMAX_DELAY);
+        MP_THREAD_GIL_ENTER();
+        if (got == pdTRUE) {
             size_t out_len;
             jmp_message_t msg; 
             jmp_dissassemble_message((uint8_t*)pkt.payload + UCORE_SANS_PREFIX_LEN, pkt.payload_len - UCORE_SANS_PREFIX_LEN, &msg);
