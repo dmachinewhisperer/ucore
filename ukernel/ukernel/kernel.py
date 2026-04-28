@@ -13,6 +13,7 @@ import pathlib
 import struct
 import sys
 import uuid
+from queue import Empty
 
 from ipykernel.kernelbase import Kernel
 from jupyter_client import KernelManager
@@ -79,6 +80,13 @@ class UCoreKernel(Kernel):
         # local python kernel
         self._local_km = None
         self._local_kc = None
+        # local_msg_id → originating Jupyter parent header. Lets the
+        # background iopub pump attribute side-effect messages (stream,
+        # display_data, comm_msg, ...) to the cell that produced them,
+        # even when those messages arrive long after the cell returned
+        # (FuncAnimation timers, ipywidgets callbacks, etc.).
+        self._local_parent_map: dict[str, dict] = {}
+        self._local_iopub_task: asyncio.Task | None = None
         # agent
         self._agent = AgentClient()
         # pipe broadcast: localhost TCP listener that consumers (host-side
@@ -88,6 +96,16 @@ class UCoreKernel(Kernel):
         self._pipe_subscribers: dict[str, set[asyncio.StreamWriter]] = {}
         self._pipe_server: asyncio.AbstractServer | None = None
         self._pipe_port: int | None = None
+
+        # ipykernel installs comm_open/comm_msg/comm_close shell handlers
+        # that route to *this* kernel's CommManager, but every Comm in the
+        # ucore stack actually lives in the local sub-kernel (ipympl,
+        # ipywidgets state, etc.). Without bridging, frontend → kernel
+        # comm traffic gets routed to an empty CommManager and silently
+        # dropped — breaking the ipympl handshake (and every interactive
+        # widget). Forward to where the comms actually live.
+        for msg_type in ("comm_open", "comm_msg", "comm_close"):
+            self.shell_handlers[msg_type] = self._forward_comm_to_local
 
     def start(self):
         super().start()
@@ -110,6 +128,7 @@ class UCoreKernel(Kernel):
         self._local_kc = self._local_km.client()
         self._local_kc.start_channels()
         self._local_kc.wait_for_ready(timeout=30)
+        self._local_iopub_task = asyncio.create_task(self._local_iopub_pump())
         log.info("local python kernel ready")
 
     async def _connect_transport(self):
@@ -121,8 +140,23 @@ class UCoreKernel(Kernel):
             baud_rate=self._serial_baud_rate,
         )
         self._transport.on_message(self._handle_device_message)
+        self._transport.on_disconnect(self._on_transport_disconnect)
         await self._transport.connect()
         log.info("transport connected (%s)", self._transport_type)
+
+    def _on_transport_disconnect(self, reason: str):
+        """Fail every in-flight request so cells error out instead of hanging
+        when the device drops mid-execution."""
+        if not self._pending:
+            return
+        log.warning("transport disconnected (%s); failing %d pending request(s)",
+                    reason, len(self._pending))
+        pending = self._pending
+        self._pending = {}
+        err = ConnectionError(f"device disconnected ({reason})")
+        for fut in pending.values():
+            if not fut.done():
+                fut.get_loop().call_soon_threadsafe(fut.set_exception, err)
 
     # ── pipe broadcast (named comm channels) ──────────────────────────
     #
@@ -251,76 +285,110 @@ class UCoreKernel(Kernel):
                         type(e).__name__, e)
             return False
 
+    # ── comm bridge (frontend → local sub-kernel) ──────────────────
+
+    def _forward_comm_to_local(self, stream, ident, msg):
+        """Shell handler installed for comm_open/comm_msg/comm_close.
+
+        Resigns the message with the sub-kernel's session key and writes it
+        to the sub-kernel's shell socket. Sub-kernel responses (state syncs,
+        canvas redraws, etc.) flow back through the existing iopub pump in
+        ``_execute_local`` whenever a cell is in flight."""
+        msg_type = msg["header"]["msg_type"]
+        content = msg.get("content", {})
+        log.debug("FWD shell→sub-kernel %s comm_id=%s",
+                  msg_type, content.get("comm_id"))
+        self._local_kc.session.send(
+            self._local_kc.shell_channel.socket,
+            msg_type,
+            content=content,
+            buffers=msg.get("buffers"),
+        )
+
     # ── local python execution ─────────────────────────────────────
+    #
+    # The sub-kernel's iopub is drained by a single long-lived task,
+    # _local_iopub_pump, that runs for the kernel's whole lifetime.
+    # Per-cell helpers only register a parent mapping and wait for the
+    # shell reply — they never read iopub themselves. This is what lets
+    # FuncAnimation timer redraws, ipywidgets callbacks and any other
+    # post-cell side effect reach the frontend instead of piling up
+    # unread until the next cell drains and discards them.
+
+    async def _local_iopub_pump(self):
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                msg = await loop.run_in_executor(
+                    None, self._local_kc.get_iopub_msg, 1.0
+                )
+            except Empty:
+                continue
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("local iopub pump read error")
+                await asyncio.sleep(0.1)
+                continue
+            try:
+                self._forward_local_iopub(msg)
+            except Exception:
+                log.exception("local iopub forward error")
+
+    def _forward_local_iopub(self, msg):
+        msg_type = msg["header"]["msg_type"]
+        parent_msg_id = msg.get("parent_header", {}).get("msg_id")
+
+        # status: not forwarded — the parent kernel emits its own busy/idle
+        # frames around do_execute. We hijack idle as the cleanup signal
+        # for the parent map: once a cell goes idle, no more attributable
+        # side-effects can come from it.
+        if msg_type == "status":
+            if (msg["content"].get("execution_state") == "idle"
+                    and parent_msg_id):
+                self._local_parent_map.pop(parent_msg_id, None)
+            return
+
+        # execute_input is just the cell source the frontend already has.
+        if msg_type == "execute_input":
+            return
+
+        # Attribute to the originating Jupyter cell when we have a mapping.
+        # Free-standing messages (e.g. timer-driven canvas redraws after
+        # the cell returned) have no mapping; the frontend routes those
+        # by comm_id, so an empty parent_header is correct.
+        parent = self._local_parent_map.get(parent_msg_id, {})
+        self._publish(msg_type, msg["content"], parent,
+                      buffers=msg.get("buffers"))
+
+    async def _await_shell_reply(self, msg_id, timeout=None):
+        loop = asyncio.get_event_loop()
+        while True:
+            reply = await loop.run_in_executor(
+                None, self._local_kc.get_shell_msg, timeout
+            )
+            if reply["parent_header"].get("msg_id") == msg_id:
+                return reply["content"]
 
     async def _execute_local(self, code, silent, store_history, allow_stdin, parent):
         msg_id = self._local_kc.execute(
             code, silent=silent, store_history=store_history,
             allow_stdin=allow_stdin,
         )
-        log.debug("local exec msg_id=%s parent=%r code=%r",
-                  msg_id, parent.get("msg_id") if isinstance(parent, dict) else parent,
-                  code[:80])
-        # proxy iopub messages until we get the execute_reply
-        while True:
-            try:
-                msg = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: self._local_kc.get_iopub_msg(timeout=30)
-                )
-            except Exception as e:
-                log.warning("local exec iopub timeout/error msg_id=%s: %s", msg_id, e)
-                break
-
-            ph_msgid = msg["parent_header"].get("msg_id")
-            mtype = msg["header"]["msg_type"]
-            log.debug("local iopub mtype=%s parent_msg_id=%s (target=%s) match=%s",
-                      mtype, ph_msgid, msg_id, ph_msgid == msg_id)
-
-            if ph_msgid != msg_id:
-                continue
-
-            msg_type = msg["header"]["msg_type"]
-            content = msg["content"]
-
-            if msg_type in ("stream", "error", "display_data", "execute_result"):
-                self._publish(msg_type, content, parent)
-            elif msg_type == "status" and content.get("execution_state") == "idle":
-                break
-
-        # get the execute_reply matching our msg_id
-        while True:
-            reply = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self._local_kc.get_shell_msg(timeout=30)
-            )
-            if reply["parent_header"].get("msg_id") == msg_id:
-                return reply["content"]
+        self._local_parent_map[msg_id] = parent
+        return await self._await_shell_reply(msg_id)
 
     async def _complete_local(self, code, cursor_pos):
         msg_id = self._local_kc.complete(code, cursor_pos)
-        while True:
-            reply = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self._local_kc.get_shell_msg(timeout=10)
-            )
-            if reply["parent_header"].get("msg_id") == msg_id:
-                return reply["content"]
+        return await self._await_shell_reply(msg_id, timeout=10)
 
     async def _inspect_local(self, code, cursor_pos, detail_level):
         msg_id = self._local_kc.inspect(code, cursor_pos, detail_level)
-        while True:
-            reply = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self._local_kc.get_shell_msg(timeout=10)
-            )
-            if reply["parent_header"].get("msg_id") == msg_id:
-                return reply["content"]
+        return await self._await_shell_reply(msg_id, timeout=10)
 
     async def _is_complete_local(self, code):
         msg_id = self._local_kc.is_complete(code)
-        while True:
-            reply = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self._local_kc.get_shell_msg(timeout=10)
-            )
-            if reply["parent_header"].get("msg_id") == msg_id:
-                return reply["content"]
+        return await self._await_shell_reply(msg_id, timeout=10)
 
     # ── device communication ────────────────────────────────────────
 
@@ -414,13 +482,10 @@ class UCoreKernel(Kernel):
 
     # ── publishing to jupyter frontend ──────────────────────────────
 
-    def _publish(self, msg_type, content, parent):
-        log.debug("publish iopub mtype=%s parent_type=%s parent_keys=%s",
-                  msg_type, type(parent).__name__,
-                  list(parent.keys()) if isinstance(parent, dict) else None)
+    def _publish(self, msg_type, content, parent, buffers=None):
         self.session.send(
             self.iopub_socket, msg_type, content,
-            parent=parent, ident=None,
+            parent=parent, ident=None, buffers=buffers,
         )
 
     async def _handle_input_request(self, msg):
@@ -521,6 +586,9 @@ class UCoreKernel(Kernel):
             )
 
         try:
+            # No timeout: cell runtime is bounded by user code, not by us.
+            # Device death is surfaced via transport read-loop failure, which
+            # cancels pending futures with ConnectionError (see _request).
             reply_msg = await self._request("execute_request", {
                 "code": code,
                 "silent": silent,
@@ -528,7 +596,7 @@ class UCoreKernel(Kernel):
                 "allow_stdin": allow_stdin,
                 "stop_on_error": True,
                 "user_expressions": {},
-            }, parent_header=parent)
+            }, parent_header=parent, timeout=None)
         except (ConnectionError, TimeoutError) as e:
             return self._device_error(type(e).__name__, str(e))
 
@@ -617,6 +685,12 @@ class UCoreKernel(Kernel):
         if self._transport:
             await self._transport.disconnect()
         await self._agent.shutdown()
+        if self._local_iopub_task:
+            self._local_iopub_task.cancel()
+            try:
+                await self._local_iopub_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._local_kc:
             self._local_kc.stop_channels()
         if self._local_km:

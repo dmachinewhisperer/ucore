@@ -19,10 +19,25 @@ class Transport(ABC):
     def __init__(self):
         self.session_id = str(uuid.uuid4()).encode("utf-8")[:SESSION_ID_LEN]
         self._on_message = None
+        self._on_disconnect = None
         self.connected = False
 
     def on_message(self, callback):
         self._on_message = callback
+
+    def on_disconnect(self, callback):
+        """Called once when the read loop ends (EOF, error, or explicit close).
+        Lets the kernel fail any in-flight requests instead of hanging."""
+        self._on_disconnect = callback
+
+    def _dispatch_disconnect(self, reason: str):
+        if self._on_disconnect:
+            try:
+                self._on_disconnect(reason)
+            except Exception as e:
+                log.error("on_disconnect callback raised: %s", e)
+            # one-shot — clear so a subsequent reconnect re-registers cleanly
+            self._on_disconnect = None
 
     @abstractmethod
     async def connect(self): ...
@@ -97,6 +112,7 @@ class TCPTransport(Transport):
 
     async def _read_loop(self):
         buf = b""
+        reason = "tcp eof"
         try:
             while self.connected:
                 chunk = await self._reader.read(4096)
@@ -115,12 +131,14 @@ class TCPTransport(Transport):
                     except Exception as e:
                         log.error("frame decode error: %s", e)
         except asyncio.CancelledError:
-            pass
+            reason = "tcp closed"
         except Exception as e:
+            reason = f"tcp read error: {e}"
             if self.connected:
                 log.error("tcp read error: %s", e)
         finally:
             self.connected = False
+            self._dispatch_disconnect(reason)
 
 
 class SerialTransport(Transport):
@@ -164,6 +182,7 @@ class SerialTransport(Transport):
     async def _read_loop(self):
         buf = b""
         loop = asyncio.get_event_loop()
+        reason = "serial closed"
         try:
             while self.connected:
                 # non-blocking read via executor to avoid blocking the event loop
@@ -186,10 +205,12 @@ class SerialTransport(Transport):
         except asyncio.CancelledError:
             pass
         except Exception as e:
+            reason = f"serial read error: {e}"
             if self.connected:
                 log.error("serial read error: %s", e)
         finally:
             self.connected = False
+            self._dispatch_disconnect(reason)
 
 
 class WebSocketTransport(Transport):
@@ -231,6 +252,7 @@ class WebSocketTransport(Transport):
 
     async def _read_loop(self):
         buf = b""
+        reason = "websocket eof"
         try:
             async for data in self._ws:
                 if isinstance(data, str):
@@ -248,12 +270,14 @@ class WebSocketTransport(Transport):
                     except Exception as e:
                         log.error("frame decode error: %s", e)
         except asyncio.CancelledError:
-            pass
+            reason = "websocket closed"
         except Exception as e:
+            reason = f"websocket read error: {e}"
             if self.connected:
                 log.error("websocket read error: %s", e)
         finally:
             self.connected = False
+            self._dispatch_disconnect(reason)
 
 
 def create_transport(transport_type: str, **kwargs) -> Transport:
