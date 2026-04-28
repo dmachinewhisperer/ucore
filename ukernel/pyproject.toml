@@ -24,3 +24,6 @@ ucore-provisioner = "ukernel.provisioner:UCoreProvisioner"
 [tool.setuptools]
 packages = ["ukernel"]
 py-modules = ["ucore_pipes"]
+
+[tool.setuptools.data-files]
+"etc/jupyter/jupyter_server_config.d" = ["jupyter-config/jupyter_server_config.d/ukernel.json"]
