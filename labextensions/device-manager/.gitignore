@@ -1,0 +1,16 @@
+# TypeScript build output
+lib/
+*.tsbuildinfo
+
+# JupyterLab webpack bundle (rebuilt by `jupyter labextension build`)
+ucore_device_manager/labextension/
+ucore_device_manager/_version.py
+
+# Node / Yarn
+node_modules/
+.yarn/
+.pnp.*
+
+# Editor / scratch
+Untitled.ipynb
+.ipynb_checkpoints/

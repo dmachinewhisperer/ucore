@@ -1,0 +1,105 @@
+.ucore-DeviceManager {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 8px 10px;
+  font-size: var(--jp-ui-font-size1);
+  color: var(--jp-ui-font-color1);
+  overflow-y: auto;
+}
+
+.ucore-Header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.ucore-Title {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--jp-ui-font-size0);
+}
+
+.ucore-Actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ucore-DeviceList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ucore-Device {
+  border: 1px solid var(--jp-border-color2);
+  border-radius: 4px;
+  padding: 8px;
+  background: var(--jp-layout-color1);
+}
+
+.ucore-Device--selected {
+  border-color: var(--jp-brand-color1);
+  background: var(--jp-brand-color3);
+}
+
+.ucore-Device--unknown {
+  opacity: 0.6;
+}
+
+.ucore-Device-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 2px;
+}
+
+.ucore-Device-id {
+  font-family: var(--jp-code-font-family);
+  font-weight: 600;
+}
+
+.ucore-Device-kind {
+  font-size: var(--jp-ui-font-size0);
+  color: var(--jp-ui-font-color2);
+  text-transform: lowercase;
+}
+
+.ucore-Device-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--jp-ui-font-size0);
+  color: var(--jp-ui-font-color2);
+  margin-bottom: 6px;
+}
+
+.ucore-Device-status {
+  font-family: var(--jp-code-font-family);
+}
+
+.ucore-Device-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ucore-empty {
+  margin: 12px 0;
+  color: var(--jp-ui-font-color2);
+  font-style: italic;
+}
+
+.ucore-Footer {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--jp-border-color3);
+  font-size: var(--jp-ui-font-size0);
+  color: var(--jp-ui-font-color2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
