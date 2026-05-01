@@ -361,7 +361,14 @@ class UCoreKernel(Kernel):
         Resigns the message with the sub-kernel's session key and writes it
         to the sub-kernel's shell socket. Sub-kernel responses (state syncs,
         canvas redraws, etc.) flow back through the existing iopub pump in
-        ``_execute_local`` whenever a cell is in flight."""
+        ``_execute_local`` whenever a cell is in flight.
+
+        Forwards metadata and parent_header alongside content/buffers — same
+        defensive stance as the sub-kernel→frontend forwarder. Today the
+        frontend doesn't usually populate metadata on inbound comm messages,
+        but ipywidgets' protocol-version negotiation and any future routing
+        hint will live there, so dropping it silently is a sharp edge.
+        """
         msg_type = msg["header"]["msg_type"]
         content = msg.get("content", {})
         log.debug("FWD shell→sub-kernel %s comm_id=%s",
@@ -370,6 +377,8 @@ class UCoreKernel(Kernel):
             self._local_kc.shell_channel.socket,
             msg_type,
             content=content,
+            parent=msg.get("parent_header"),
+            metadata=msg.get("metadata"),
             buffers=msg.get("buffers"),
         )
 
