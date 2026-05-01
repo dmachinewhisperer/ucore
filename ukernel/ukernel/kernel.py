@@ -393,7 +393,7 @@ class UCoreKernel(Kernel):
     # unread until the next cell drains and discards them.
 
     async def _local_iopub_pump(self):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             try:
                 msg = await loop.run_in_executor(
@@ -443,7 +443,7 @@ class UCoreKernel(Kernel):
                       metadata=msg.get("metadata"))
 
     async def _await_shell_reply(self, msg_id, timeout=None):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             reply = await loop.run_in_executor(
                 None, self._local_kc.get_shell_msg, timeout
@@ -495,7 +495,7 @@ class UCoreKernel(Kernel):
         if parent_header:
             _bounded_set(self._jupyter_parents, header["msg_id"], parent_header)
 
-        future = asyncio.get_event_loop().create_future()
+        future = asyncio.get_running_loop().create_future()
         self._pending[header["msg_id"]] = future
 
         ok = await self._transport.send(msg)
