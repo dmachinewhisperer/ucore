@@ -537,7 +537,13 @@ class UCoreKernel(Kernel):
 
         if msg_type in ("stream", "error", "display_data", "execute_result"):
             parent = self._resolve_jupyter_parent(msg)
-            self._publish(msg_type, msg.get("content", {}), parent)
+            # Pass metadata and buffers through. Today the JMP wire layer
+            # zero-fills both slots, so this is a no-op until/unless the
+            # protocol grows real metadata/buffer carriage. Wiring it now
+            # means we can't repeat the iopub-metadata bug on this side.
+            self._publish(msg_type, msg.get("content", {}), parent,
+                          buffers=msg.get("buffers"),
+                          metadata=msg.get("metadata"))
             return
 
         if msg_type == "status":
