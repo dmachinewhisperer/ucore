@@ -87,6 +87,15 @@ class UCoreKernel(Kernel):
     }
     banner = "µcore — Python + MicroPython (%%ucore) + Agent (%%uagent)"
 
+    # ipykernel 7's per-cell subshell routing (JupyterLab + jupyter-ai both
+    # use it for parallel execution) doesn't survive a kernel restart: the
+    # frontend keeps reusing subshell_ids the new process never registered,
+    # so every routed shell message hits a KeyError in
+    # shell_channel_thread_main and the cell silently drops. Opting out
+    # forces shell traffic through the legacy main-shell path, which is
+    # sequential per cell but reliably routes after restart.
+    _supports_kernel_subshells = False
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # device transport
