@@ -528,11 +528,23 @@ class UCoreKernel(Kernel):
             self._dispatch_pipe_message(msg.get("content", {}))
             return
 
-        if msg_type in ("comm_open", "comm_close"):
-            # Currently informational on the host side; pipe subscribers are
-            # tracked by connection lifetime, not by these JMP messages.
-            log.debug("device %s for comm_id=%r", msg_type,
-                      msg.get("content", {}).get("comm_id"))
+        if msg_type == "comm_close":
+            # Forward to the frontend so any host-side consumer (e.g. a
+            # comm registered against the device's comm_id) can clean up.
+            # Pipe subscribers are still tracked by their TCP connection
+            # lifetime — comm_close is just a hint.
+            parent = self._resolve_jupyter_parent(msg)
+            self._publish(msg_type, msg.get("content", {}), parent)
+            return
+
+        if msg_type == "comm_open":
+            # JMP carries a numeric target_id; Jupyter expects a string
+            # target_name. We have no target_id↔target_name map, so a
+            # forwarded message wouldn't dispatch to anything useful — the
+            # frontend would just send a comm_close back. Stay informational
+            # until/unless that mapping exists.
+            log.debug("device %s for comm_id=%r (not forwarded — no target_id↔target_name map)",
+                      msg_type, msg.get("content", {}).get("comm_id"))
             return
 
         if msg_type in ("stream", "error", "display_data", "execute_result"):
