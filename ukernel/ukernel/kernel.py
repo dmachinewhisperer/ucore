@@ -37,6 +37,27 @@ log = logging.getLogger(__name__)
 UCORE_MAGIC = "%%ucore"
 UAGENT_MAGIC = "%%uagent"
 
+# Hard cap on how many in-flight cell parents we'll track before evicting
+# the oldest. Both _jupyter_parents and _local_parent_map are cleaned up on
+# the corresponding status:idle, but a transport drop or sub-kernel crash
+# mid-cell leaves the entry stranded — over a long-running kernel this
+# would slowly leak memory.
+_PARENT_TRACK_CAP = 1024
+
+
+def _bounded_set(dct: dict, key, value, *, cap: int = _PARENT_TRACK_CAP) -> None:
+    """Insert into ``dct`` while holding it under ``cap`` entries.
+
+    Evicts the oldest entry on overflow. Relies on Python 3.7+ dicts being
+    insertion-ordered.
+    """
+    if key in dct:
+        dct[key] = value
+        return
+    if len(dct) >= cap:
+        dct.pop(next(iter(dct)), None)
+    dct[key] = value
+
 
 def _detect_magic(code):
     """Detect cell magic and return (magic, clean_code).
@@ -179,6 +200,9 @@ class UCoreKernel(Kernel):
     def _on_transport_disconnect(self, reason: str):
         """Fail every in-flight request so cells error out instead of hanging
         when the device drops mid-execution."""
+        # Strand-free: parents tracked for in-flight device requests can no
+        # longer resolve, so drop them now rather than leak until restart.
+        self._jupyter_parents.clear()
         if not self._pending:
             return
         log.warning("transport disconnected (%s); failing %d pending request(s)",
@@ -423,7 +447,7 @@ class UCoreKernel(Kernel):
             code, silent=silent, store_history=store_history,
             allow_stdin=allow_stdin,
         )
-        self._local_parent_map[msg_id] = parent
+        _bounded_set(self._local_parent_map, msg_id, parent)
         return await self._await_shell_reply(msg_id)
 
     async def _complete_local(self, code, cursor_pos):
@@ -460,7 +484,7 @@ class UCoreKernel(Kernel):
 
         # track the jupyter parent so side-effects can reference it
         if parent_header:
-            self._jupyter_parents[header["msg_id"]] = parent_header
+            _bounded_set(self._jupyter_parents, header["msg_id"], parent_header)
 
         future = asyncio.get_event_loop().create_future()
         self._pending[header["msg_id"]] = future
