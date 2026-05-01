@@ -240,6 +240,12 @@ class UCoreKernel(Kernel):
                 pass
             log.info("pipe subscriber %s disconnected from %r", peer, name)
 
+    # Cap how much we'll let a single subscriber buffer before we drop it.
+    # asyncio's StreamWriter.write doesn't raise on a stalled peer — it just
+    # appends to a transport-level buffer that grows in process memory. A
+    # consumer that stops draining would otherwise OOM the kernel.
+    _PIPE_WRITE_BUFFER_LIMIT = 1024 * 1024  # 1 MiB
+
     def _dispatch_pipe_message(self, content):
         name = content.get("comm_id", "")
         data = content.get("data", b"")
@@ -248,14 +254,20 @@ class UCoreKernel(Kernel):
         subs = self._pipe_subscribers.get(name)
         if not subs:
             return
-        header = struct.pack("<I", len(data))
+        frame = struct.pack("<I", len(data)) + data
         dead = []
         for w in subs:
+            transport = w.transport
+            if transport is None or transport.is_closing():
+                dead.append(w)
+                continue
+            if transport.get_write_buffer_size() > self._PIPE_WRITE_BUFFER_LIMIT:
+                log.warning("pipe subscriber for %r is too slow (buffered=%d B); dropping",
+                            name, transport.get_write_buffer_size())
+                dead.append(w)
+                continue
             try:
-                w.write(header + data)
-                # fire-and-forget: don't await drain so a slow consumer
-                # can't block the producer. transport buffer absorbs bursts;
-                # if it fills, write() raises and we drop the subscriber.
+                w.write(frame)
             except Exception as e:
                 log.debug("pipe subscriber write failed for %r: %s", name, e)
                 dead.append(w)
