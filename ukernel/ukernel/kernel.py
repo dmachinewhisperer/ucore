@@ -390,8 +390,12 @@ class UCoreKernel(Kernel):
         # the cell returned) have no mapping; the frontend routes those
         # by comm_id, so an empty parent_header is correct.
         parent = self._local_parent_map.get(parent_msg_id, {})
+        # Forward metadata too — comm_open carries the ipywidgets protocol
+        # version there, and dropping it makes the frontend reject every
+        # widget with "Wrong widget protocol version".
         self._publish(msg_type, msg["content"], parent,
-                      buffers=msg.get("buffers"))
+                      buffers=msg.get("buffers"),
+                      metadata=msg.get("metadata"))
 
     async def _await_shell_reply(self, msg_id, timeout=None):
         loop = asyncio.get_event_loop()
@@ -514,10 +518,11 @@ class UCoreKernel(Kernel):
 
     # ── publishing to jupyter frontend ──────────────────────────────
 
-    def _publish(self, msg_type, content, parent, buffers=None):
+    def _publish(self, msg_type, content, parent, buffers=None, metadata=None):
         self.session.send(
             self.iopub_socket, msg_type, content,
             parent=parent, ident=None, buffers=buffers,
+            metadata=metadata,
         )
 
     async def _handle_input_request(self, msg):
