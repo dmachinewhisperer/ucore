@@ -20,3 +20,7 @@ checkpoint.txt
 .ipynb_checkpoints
 notebooks
 devdocs
+.claude
+
+# Build artifacts
+ukernel/build/
