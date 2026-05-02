@@ -15,7 +15,7 @@ INFO = r"""@_UCORE_BOARD_INFO@"""
 # Typical pattern: a %%ucore cell starts a background _thread that writes
 # samples to a pipe, then returns. The cell completes immediately; the
 # thread keeps emitting frames. A second cell on the host reads the pipe
-# via `ucore_pipes.open(name)`.
+# via `ukernel.pipes.open(name)`.
 #
 #   import ucore, _thread, machine, time, struct
 #   adc = machine.ADC(machine.Pin(4))

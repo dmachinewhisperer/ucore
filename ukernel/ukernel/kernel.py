@@ -94,6 +94,8 @@ class UCoreKernel(Kernel):
     # shell_channel_thread_main and the cell silently drops. Opting out
     # forces shell traffic through the legacy main-shell path, which is
     # sequential per cell but reliably routes after restart.
+    # TODO: investigate subshells further and see if any discussion upstream to fix
+    # ui retaining stale subshells after a kernel restart. 
     _supports_kernel_subshells = False
 
     def __init__(self, **kwargs):

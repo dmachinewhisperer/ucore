@@ -11,7 +11,7 @@ arbitrary bytes:
 The host-side code (running in a regular notebook cell, NOT a %%ucore
 cell) consumes those bytes:
 
-    from ucore_pipes import open as open_pipe
+    from ukernel.pipes import open as open_pipe
     with open_pipe("adc") as pipe:
         for chunk in pipe:
             value, = struct.unpack("<f", chunk)
@@ -156,12 +156,16 @@ class _LivePlot:
         self.buf = collections.deque([0.0] * window, maxlen=window)
         self.pipe = Pipe(name)
 
-        self.fig, self.ax = plt.subplots()
-        self.line, = self.ax.plot(range(window), list(self.buf))
-        if ylim is not None:
-            self.ax.set_ylim(*ylim)
-        if title:
-            self.ax.set_title(title)
+        # ipympl auto-displays a figure on creation when interactive mode is
+        # on (the default under %matplotlib widget). Suppress that so our
+        # explicit display() below produces exactly one canvas, not two.
+        with plt.ioff():
+            self.fig, self.ax = plt.subplots()
+            self.line, = self.ax.plot(range(window), list(self.buf))
+            if ylim is not None:
+                self.ax.set_ylim(*ylim)
+            if title:
+                self.ax.set_title(title)
         display(self.fig.canvas)
 
         def reader():
@@ -176,10 +180,20 @@ class _LivePlot:
                         continue
             except Exception:
                 pass
+            finally:
+                # Producer ended (or we were torn down) — signal update() to
+                # halt the animation so we stop pushing identical frames.
+                self.stop.set()
 
         threading.Thread(target=reader, daemon=True).start()
 
         def update(_frame):
+            if self.stop.is_set():
+                try:
+                    self.ani.event_source.stop()
+                except Exception:
+                    pass
+                return (self.line,)
             self.line.set_ydata(list(self.buf))
             # Force a full PNG instead of an ipympl diff to avoid the
             # accumulating-trail artifact that diff-rendering causes.

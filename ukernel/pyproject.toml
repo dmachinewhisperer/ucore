@@ -23,7 +23,11 @@ ucore-provisioner = "ukernel.provisioner:UCoreProvisioner"
 
 [tool.setuptools]
 packages = ["ukernel"]
-py-modules = ["ucore_pipes"]
 
 [tool.setuptools.data-files]
 "etc/jupyter/jupyter_server_config.d" = ["jupyter-config/jupyter_server_config.d/ukernel.json"]
+"share/jupyter/kernels/ucore" = [
+    "kernel-spec/kernel.json",
+    "kernel-spec/logo-32x32.png",
+    "kernel-spec/logo-64x64.png",
+]
