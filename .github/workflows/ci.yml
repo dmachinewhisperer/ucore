@@ -51,7 +51,7 @@ jobs:
   firmware:
     name: firmware · ${{ matrix.board }}
     runs-on: ubuntu-latest
-    container: espressif/idf:release-v5.3
+    container: espressif/idf:release-v5.5
     strategy:
       fail-fast: false
       matrix:
