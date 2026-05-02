@@ -83,3 +83,20 @@ jobs:
           path: firmware/ucore-${{ matrix.board }}.bin
           if-no-files-found: error
           retention-days: 14
+
+  docs:
+    name: docs · build check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install docs deps
+        run: pip install -r docs/requirements.txt
+
+      - name: Build site (strict — fail on broken refs)
+        run: mkdocs build --strict

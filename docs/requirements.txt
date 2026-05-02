@@ -1,0 +1,5 @@
+# Pinned dependencies for the µcore docs site (mkdocs build).
+# Loose-pinned to a compatible major: patches roll in, breaking
+# changes don't. Bump deliberately when Material releases a new minor.
+mkdocs ~= 1.6
+mkdocs-material ~= 9.7

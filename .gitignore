@@ -24,3 +24,4 @@ devdocs
 
 # Build artifacts
 ukernel/build/
+site/
