@@ -80,7 +80,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.board }}
-          path: firmware/ucore-${{ matrix.board }}.bin
+          path: firmware/build/ucore-${{ matrix.board }}.bin
           if-no-files-found: error
           retention-days: 14
 
