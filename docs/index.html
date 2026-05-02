@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>µcore — Jupyter for microcontrollers</title>
+<meta name="description" content="Jupyter kernel for MicroPython on microcontrollers. Write notebooks, stream sensor data live, no toolchain required.">
+<link rel="icon" type="image/png" href="favicon.png">
+<style>
+  :root {
+    --bg: #1f2937;
+    --bg-elev: #273548;
+    --fg: #e5e7eb;
+    --fg-dim: #9ca3af;
+    --accent: #5eead4;
+    --accent-warm: #fbbf24;
+    --border: #374151;
+    --max-w: 720px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: var(--bg-elev); padding: 2px 6px; border-radius: 4px;
+    font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 14px 20px;
+  }
+  header .inner {
+    max-width: var(--max-w); margin: 0 auto;
+    display: flex; align-items: center; gap: 10px;
+  }
+  header img { width: 28px; height: 28px; border-radius: 6px; }
+  header .name { font-weight: 700; letter-spacing: 0.2px; font-size: 17px; }
+  header nav {
+    margin-left: auto; display: flex; gap: 18px;
+    font-size: 14px; color: var(--fg-dim);
+  }
+  main {
+    max-width: var(--max-w); margin: 0 auto; padding: 56px 20px 80px;
+  }
+  .tagline {
+    font-size: 28px; line-height: 1.25; font-weight: 600;
+    margin: 0 0 18px;
+  }
+  .tagline em {
+    color: var(--accent); font-style: normal;
+  }
+  .lede {
+    font-size: 17px; color: var(--fg-dim); margin: 0 0 36px; max-width: 560px;
+  }
+  .flash-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 28px; margin: 36px 0 24px;
+  }
+  .flash-card h2 {
+    margin: 0 0 6px; font-size: 18px; letter-spacing: 0.2px;
+  }
+  .flash-card p {
+    margin: 0 0 20px; color: var(--fg-dim); font-size: 14px;
+  }
+  esp-web-install-button {
+    --esp-tools-button-color: #1f2937;
+    --esp-tools-button-text-color: #1f2937;
+    --esp-tools-button-border-radius: 8px;
+  }
+  .install-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--accent); color: #1f2937;
+    border: 0; border-radius: 8px;
+    font: 600 15px/1 inherit; padding: 12px 20px;
+    cursor: pointer;
+  }
+  .install-btn:hover { background: #7df0dc; }
+  .install-btn[disabled] {
+    background: var(--border); color: var(--fg-dim); cursor: not-allowed;
+  }
+  .pulse {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent-warm);
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.7);
+    animation: pulse 1.6s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0   rgba(251, 191, 36, 0.7); }
+    70%  { box-shadow: 0 0 0 10px rgba(251, 191, 36, 0); }
+    100% { box-shadow: 0 0 0 0   rgba(251, 191, 36, 0); }
+  }
+  .browser-note {
+    margin-top: 18px; font-size: 13px; color: var(--fg-dim);
+  }
+  .next {
+    margin-top: 48px;
+  }
+  .next h2 { font-size: 18px; margin: 0 0 12px; }
+  .next ol { margin: 0; padding-left: 22px; color: var(--fg-dim); }
+  .next ol li { margin-bottom: 8px; }
+  .next ol li code { color: var(--fg); }
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 20px; margin-top: 60px;
+    color: var(--fg-dim); font-size: 13px;
+  }
+  footer .inner {
+    max-width: var(--max-w); margin: 0 auto;
+    display: flex; gap: 16px; flex-wrap: wrap;
+  }
+  footer .inner > :last-child { margin-left: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="inner">
+    <img src="favicon.png" alt="">
+    <span class="name">µcore</span>
+    <nav>
+      <a href="https://github.com/dmachinewhisperer/ucore">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <h1 class="tagline">Jupyter notebooks <em>for your microcontroller.</em></h1>
+  <p class="lede">
+    µcore is a Jupyter kernel that runs MicroPython on a microcontroller
+    over USB. Write cells, stream sensor data into live plots, no flashing
+    toolchain required.
+  </p>
+
+  <div class="flash-card">
+    <h2>1 · Flash your board</h2>
+    <p>Plug in a supported board over USB, then flash µcore directly from
+       this page. <span style="color:var(--fg-dim)">Supported today:
+       ESP32, ESP32-S3.</span></p>
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate" class="install-btn">
+        <span class="pulse"></span> Connect &amp; flash
+      </button>
+      <span slot="unsupported">
+        <button class="install-btn" disabled>Browser not supported</button>
+      </span>
+      <span slot="not-allowed">
+        <button class="install-btn" disabled>Open this page over HTTPS</button>
+      </span>
+    </esp-web-install-button>
+    <p class="browser-note">
+      Web Serial requires a Chromium browser
+      (Chrome, Edge, Brave, Opera). Firefox and Safari users can fall back
+      to <code>esptool.py write_flash 0 ucore-&lt;board&gt;.bin</code>.
+    </p>
+  </div>
+
+  <section class="next">
+    <h2>2 · Install the kernel</h2>
+    <ol>
+      <li>In your Jupyter venv: <code>pip install ucore</code></li>
+      <li>Launch <code>jupyter lab</code> — the µcore kernel appears in the launcher.</li>
+      <li>New notebook → start with <code>%%ucore</code> cells; the kernel
+          finds the device automatically.</li>
+    </ol>
+  </section>
+</main>
+
+<footer>
+  <div class="inner">
+    <span>µcore</span>
+    <span>MIT licensed</span>
+    <a href="https://github.com/dmachinewhisperer/ucore">github.com/dmachinewhisperer/ucore</a>
+  </div>
+</footer>
+
+<script type="module"
+        src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</body>
+</html>

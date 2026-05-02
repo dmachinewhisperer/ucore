@@ -1,0 +1,25 @@
+{
+  "name": "µcore",
+  "version": "latest",
+  "new_install_prompt_erase": false,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "https://github.com/dmachinewhisperer/ucore/releases/latest/download/ucore-esp32-generic.bin",
+          "offset": 0
+        }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "https://github.com/dmachinewhisperer/ucore/releases/latest/download/ucore-esp32-s3.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
