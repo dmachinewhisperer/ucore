@@ -13,6 +13,7 @@ dependencies = [
     "agent-client-protocol",
     "cobs",
     "pyserial",
+    "ucore-device-manager",
 ]
 
 [project.optional-dependencies]
