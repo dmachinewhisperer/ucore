@@ -38,10 +38,18 @@ page. No `esptool`, no IDF, no Python required for this step.
 | ESP32 (generic) | ESP32 | `ucore-esp32-generic.bin` |
 | ESP32-S3 | ESP32-S3 | `ucore-esp32-s3.bin` |
 
-## What's on the device after flashing
+## What's on the microcontroller after flashing
 
-A frozen MicroPython firmware that exposes the `ucore` module: named
-pipes back to the host, JMP transport over USB CDC, and the
-[full MicroPython standard library](https://docs.micropython.org/).
-After flashing, head to [Getting started](getting-started.md) to
-install the Jupyter kernel.
+The µcore runtime — a binary implementation of a subset of the Jupyter
+messaging protocol that runs directly on the microcontroller. It manages a
+[MicroPython](https://docs.micropython.org/) interpreter for executing user
+code, handles named pipes for streaming data back to the host, and
+communicates over a supported serial transport.
+
+MicroPython is one component of the platform. ucore is the runtime layer that
+connects it to your notebook — handling cell dispatch, output streaming, pipe
+multiplexing, and the protocol that makes the kernel on your machine and the
+firmware on the microcontroller speak the same language.
+
+After flashing, head to [Getting started](getting-started.md) to install the
+Jupyter kernel.
