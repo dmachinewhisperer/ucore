@@ -2,8 +2,6 @@
 lib/
 *.tsbuildinfo
 
-# JupyterLab webpack bundle (rebuilt by `jupyter labextension build`)
-ucore_device_manager/labextension/
 ucore_device_manager/_version.py
 
 # Node / Yarn
