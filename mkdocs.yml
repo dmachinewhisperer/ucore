@@ -1,5 +1,5 @@
 site_name: µcore
-site_description: Jupyter notebooks for microcontrollers — MicroPython kernel with live sensor streaming.
+site_description: Jupyter kernel for microcontrollers — run MicroPython on ESP32 from a notebook.
 site_url: https://dmachinewhisperer.github.io/ucore/
 repo_url: https://github.com/dmachinewhisperer/ucore
 repo_name: dmachinewhisperer/ucore
@@ -38,15 +38,22 @@ theme:
 
 nav:
   - Home: index.md
-  - Flash firmware: flash.md
-  - Getting started: getting-started.md
+  - Getting Started: getting-started.md
+  - Firmware: flash.md
+  - Documentation:
+    - Pipes: pipes.md
+    - uagent: uagent.md
 
 markdown_extensions:
   - admonition
   - attr_list
   - md_in_html
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight:
       anchor_linenums: true
       line_spans: __span
@@ -55,6 +62,9 @@ markdown_extensions:
   - pymdownx.snippets
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - toc:
       permalink: true
 
