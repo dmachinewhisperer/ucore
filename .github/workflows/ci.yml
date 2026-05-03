@@ -48,44 +48,6 @@ jobs:
           /tmp/smoke/bin/python -c "from ukernel.pipes import live_plot, open, stop_live"
           /tmp/smoke/bin/python -m ukernel install --help
 
-  firmware:
-    name: firmware · ${{ matrix.board }}
-    runs-on: ubuntu-latest
-    container: espressif/idf:v5.5.2
-    strategy:
-      fail-fast: false
-      matrix:
-        board: [ESP32_GENERIC, ESP32_GENERIC_S3]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Build (${{ matrix.board }})
-        working-directory: firmware
-        shell: bash
-        run: |
-          . $IDF_PATH/export.sh
-          idf.py -DMICROPY_BOARD=${{ matrix.board }} build
-
-      - name: Merge into single flashable .bin
-        working-directory: firmware
-        shell: bash
-        run: |
-          . $IDF_PATH/export.sh
-          idf.py -DMICROPY_BOARD=${{ matrix.board }} \
-                 merge-bin -o ucore-${{ matrix.board }}.bin
-
-      - name: Upload merged binary as workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-${{ matrix.board }}
-          path: firmware/build/ucore-${{ matrix.board }}.bin
-          if-no-files-found: error
-          retention-days: 14
-
   docs:
     name: docs · build check
     runs-on: ubuntu-latest
