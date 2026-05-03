@@ -11,6 +11,7 @@ import os
 import pathlib
 import struct
 import sys
+import tempfile
 import uuid
 from queue import Empty
 
@@ -26,7 +27,7 @@ from .transport import create_transport
 # Route ucore kernel logs to a stable, readable file. Jupyter captures
 # stderr per-kernel and rotates aggressively; debugging this kernel
 # end-to-end is much easier with a dedicated log we control.
-_LOG_PATH = os.environ.get("UCORE_LOG", "/tmp/ucore-kernel.log")
+_LOG_PATH = os.environ.get("UCORE_LOG", os.path.join(tempfile.gettempdir(), "ucore-kernel.log"))
 _log_handler = logging.FileHandler(_LOG_PATH, mode="a")
 _log_handler.setFormatter(logging.Formatter(
     "%(asctime)s %(levelname)s %(name)s: %(message)s"))
