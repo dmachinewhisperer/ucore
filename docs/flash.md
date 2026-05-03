@@ -4,7 +4,7 @@ Plug in a supported board over USB, then flash µcore directly from this
 page. No `esptool`, no IDF, no Python required for this step.
 
 <div style="margin: 32px 0;">
-  <esp-web-install-button manifest="manifest.json">
+  <esp-web-install-button manifest="../manifest.json">
     <button slot="activate" class="md-button md-button--primary">
       Connect &amp; flash
     </button>
