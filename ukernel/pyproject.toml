@@ -12,6 +12,7 @@ dependencies = [
     "jupyter-client>=8.0",
     "agent-client-protocol",
     "cobs",
+    "filelock>=3.0",
     "pyserial",
     "ucore-device-manager",
 ]
