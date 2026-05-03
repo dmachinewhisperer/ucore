@@ -25,3 +25,6 @@ devdocs
 # Build artifacts
 ukernel/build/
 site/
+
+# Out-of-tree work (forks, scratch repos for upstream PRs)
+subproject/
