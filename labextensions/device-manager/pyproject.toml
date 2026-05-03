@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "ucore-device-manager"
@@ -9,9 +9,9 @@ description = "Sidebar device manager JupyterLab extension for ucore"
 requires-python = ">=3.10"
 dependencies = []
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["ucore_device_manager*"]
+[tool.hatch.build.targets.wheel]
+packages = ["ucore_device_manager"]
+exclude = ["ucore_device_manager/labextension"]
 
-[tool.setuptools.package-data]
-ucore_device_manager = ["labextension/**/*"]
+[tool.hatch.build.targets.wheel.shared-data]
+"ucore_device_manager/labextension" = "share/jupyter/labextensions/@ucore/device-manager"
