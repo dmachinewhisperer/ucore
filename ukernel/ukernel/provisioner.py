@@ -4,9 +4,10 @@
 
 import json
 import os
+import platform
 import signal
 import pathlib
-import fcntl
+from filelock import FileLock
 from jupyter_client.provisioning import LocalProvisioner
 
 STATE_FILENAME = ".ucore_kernel_state.json"
@@ -22,14 +23,16 @@ def _state_path():
     return pathlib.Path(__file__).resolve().parent.parent / STATE_FILENAME
 
 
+def _lock_path():
+    return _state_path().with_suffix(".lock")
+
+
 def _read_state():
     p = _state_path()
     try:
-        with open(p) as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
-            data = json.load(f)
-            fcntl.flock(f, fcntl.LOCK_UN)
-            return data
+        with FileLock(str(_lock_path()), timeout=5):
+            with open(p) as f:
+                return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
 
@@ -37,33 +40,25 @@ def _read_state():
 def _write_state(state):
     """Replace the whole state dict (lifecycle write)."""
     p = _state_path()
-    with open(p, "w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        json.dump(state, f)
-        fcntl.flock(f, fcntl.LOCK_UN)
+    with FileLock(str(_lock_path()), timeout=5):
+        with open(p, "w") as f:
+            json.dump(state, f)
 
 
 def _merge_state(updates):
-    """Read-modify-write merge of `updates` into the state file under
-    flock. Safe to call concurrently with the kernel's own writes."""
+    """Read-modify-write merge of `updates` into the state file under lock.
+    Safe to call concurrently with the kernel's own writes."""
     p = _state_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    # Open r+ if it exists, else create fresh.
-    mode = "r+" if p.exists() else "w+"
-    with open(p, mode) as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    with FileLock(str(_lock_path()), timeout=5):
         try:
-            f.seek(0)
-            try:
+            with open(p) as f:
                 state = json.load(f)
-            except (json.JSONDecodeError, ValueError):
-                state = {}
-            state.update(updates)
-            f.seek(0)
-            f.truncate()
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            state = {}
+        state.update(updates)
+        with open(p, "w") as f:
             json.dump(state, f)
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _remove_state():
@@ -83,33 +78,33 @@ def _remove_state():
 
 
 def _is_our_kernel(pid):
-    """True iff `pid` is a running ucore kernel process.
-
-    Checks two things:
-      1. /proc/<pid>/status exists with a State that isn't Z/X (zombie/dead).
-         os.kill(pid, 0) returns success for zombies, which would make us
-         "reuse" a corpse and silently send Jupyter the dead kernel's ZMQ
-         ports — this was the bug behind the no-output symptom.
-      2. /proc/<pid>/cmdline mentions our entry point (`ukernel`). PIDs get
-         reused on long-running systems; without this, a stale state file
-         can cause us to attach to an unrelated process that happens to
-         have the same pid.
-    """
-    try:
-        with open(f"/proc/{pid}/status") as f:
-            for line in f:
-                if line.startswith("State:"):
-                    state_chr = line.split()[1] if len(line.split()) > 1 else ""
-                    if state_chr in ("Z", "X", "x"):
-                        return False
-                    break
-            else:
-                return False
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", "replace")
-        return "ukernel" in cmdline
-    except (FileNotFoundError, ProcessLookupError, OSError):
-        return False
+    """True iff `pid` is a running ucore kernel process."""
+    if platform.system() == "Linux":
+        # Check /proc for zombie/dead state and cmdline to guard against PID reuse.
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("State:"):
+                        state_chr = line.split()[1] if len(line.split()) > 1 else ""
+                        if state_chr in ("Z", "X", "x"):
+                            return False
+                        break
+                else:
+                    return False
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+            return "ukernel" in cmdline
+        except (FileNotFoundError, ProcessLookupError, OSError):
+            return False
+    else:
+        # Non-Linux (Windows, macOS): existence check only.
+        # No zombie guard or cmdline verification — PID reuse is unlikely
+        # in the short lifetime of a Jupyter session.
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
 
 
 # Backwards-compat alias used by older callers.
