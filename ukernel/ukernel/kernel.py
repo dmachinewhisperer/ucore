@@ -5,7 +5,6 @@
 # default: execute on local python.  %%ucore magic: execute on device.
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -18,8 +17,10 @@ from queue import Empty
 from ipykernel.kernelbase import Kernel
 from jupyter_client import KernelManager
 
+from filelock import FileLock
+
 from .agent_client import AgentClient
-from .provisioner import _state_path as _ucore_state_path
+from .provisioner import _lock_path as _ucore_lock_path, _state_path as _ucore_state_path
 from .transport import create_transport
 
 # Route ucore kernel logs to a stable, readable file. Jupyter captures
@@ -104,9 +105,10 @@ class UCoreKernel(Kernel):
         self._transport = None
         self._pending: dict[str, asyncio.Future] = {}
         self._jupyter_parents: dict[str, dict] = {}
-        self._transport_type = os.environ.get("UCORE_TRANSPORT", "tcp")
+        self._transport_type = os.environ.get("UCORE_TRANSPORT", "serial")
         self._transport_host = os.environ.get("UCORE_HOST", "localhost")
         self._transport_port = int(os.environ.get("UCORE_PORT", "5555"))
+        self._serial_port_path: str | None = None
         self._serial_port_path = self._resolve_serial_port()
         self._serial_baud_rate = int(os.environ.get("UCORE_BAUD_RATE", "115200"))
         # local python kernel
@@ -176,37 +178,65 @@ class UCoreKernel(Kernel):
         await self._transport.connect()
         log.info("transport connected (%s)", self._transport_type)
 
-    def _resolve_serial_port(self) -> str:
+    def _resolve_serial_port(self) -> str | None:
         """Pick the serial device this kernel will attach to.
 
         Precedence: explicit env override > selection persisted by the
-        sidebar > probe-pick-first JMP-speaking device on the bus. The
-        last fallback is "/dev/ttyUSB0" so a kernel started on a system
-        with no serial devices fails predictably rather than at random.
+        sidebar > previously resolved path if still on the bus > probe
+        JMP-speaking devices and pick the first. Returns None when no
+        device is reachable so the caller can surface a clear error
+        rather than connecting to a guessed path.
+
+        Re-callable: ``_ensure_transport`` invokes this on each failed
+        reconnect to pick up boards plugged in after kernel start.
         """
         env_port = os.environ.get("UCORE_SERIAL_PORT")
         if env_port:
             return env_port
 
+        from .devices import enumerate_devices, probe_jmp
         from .provisioner import _read_state
+
         state = _read_state() or {}
         selected = state.get("selected_device")
         if selected:
-            from .devices import enumerate_devices
             for d in enumerate_devices():
                 if d.id == selected or d.path == selected:
                     return d.path
             log.warning("selected_device %r not present; falling back", selected)
 
-        from .devices import enumerate_devices, probe_jmp
-        for d in enumerate_devices():
-            if d.kind == "unknown":
-                continue
+        # Reuse the cached path if it's still on the bus. Probing opens
+        # the port and pulses DTR (resetting the chip on standard dev
+        # boards), so hot reconnect must not re-probe when nothing has
+        # changed.
+        if self._serial_port_path:
+            if any(d.path == self._serial_port_path
+                   for d in enumerate_devices()):
+                return self._serial_port_path
+            log.info("cached port %s no longer present; re-discovering",
+                     self._serial_port_path)
+
+        candidates = [d for d in enumerate_devices() if d.kind != "unknown"]
+        speakers: list = []
+        for d in candidates:
             probe_jmp(d)
             if d.speaks_jmp:
-                log.info("auto-attached to %s (%s)", d.path, d.kind)
-                return d.path
-        return "/dev/ttyUSB0"
+                speakers.append(d)
+
+        if not speakers:
+            return None
+        if len(speakers) > 1:
+            # enumerate_devices() sorts by id, so this is stable across runs.
+            chosen = speakers[0]
+            log.info(
+                "multiple JMP-speaking devices found (%s); auto-picking %s. "
+                "Set UCORE_SERIAL_PORT to override.",
+                ", ".join(f"{d.path} ({d.kind})" for d in speakers),
+                chosen.path,
+            )
+            return chosen.path
+        log.info("auto-attached to %s (%s)", speakers[0].path, speakers[0].kind)
+        return speakers[0].path
 
     def _on_transport_disconnect(self, reason: str):
         """Fail every in-flight request so cells error out instead of hanging
@@ -314,30 +344,18 @@ class UCoreKernel(Kernel):
                 pass
 
     def _update_state_file(self, fields: dict):
-        """Merge `fields` into the provisioner state file under flock."""
+        """Merge `fields` into the provisioner state file under lock."""
         path = _ucore_state_path()
         try:
-            with open(path, "r+") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
+            with FileLock(str(_ucore_lock_path()), timeout=5):
                 try:
-                    state = json.load(f)
-                except (json.JSONDecodeError, ValueError):
+                    with open(path) as f:
+                        state = json.load(f)
+                except (FileNotFoundError, json.JSONDecodeError, ValueError):
                     state = {}
                 state.update(fields)
-                f.seek(0)
-                f.truncate()
-                json.dump(state, f)
-                fcntl.flock(f, fcntl.LOCK_UN)
-        except FileNotFoundError:
-            # state file may not exist yet if the provisioner hasn't written
-            # it. Create it minimally so consumers can discover us.
-            try:
                 with open(path, "w") as f:
-                    fcntl.flock(f, fcntl.LOCK_EX)
-                    json.dump(fields, f)
-                    fcntl.flock(f, fcntl.LOCK_UN)
-            except OSError as e:
-                log.warning("could not write state file %s: %s", path, e)
+                    json.dump(state, f)
         except OSError as e:
             log.warning("could not update state file %s: %s", path, e)
 
@@ -346,7 +364,10 @@ class UCoreKernel(Kernel):
 
         Called on each %%ucore cell so a transient device disconnect (e.g.
         a flash or a USB re-attach) self-heals on the next attempt rather
-        than wedging the kernel until restart.
+        than wedging the kernel until restart. For serial transports we
+        re-resolve the port path each time so a board plugged in *after*
+        kernel start gets picked up — cheap when the cached path is still
+        on the bus, full re-probe only when it's gone.
         """
         if self._transport and self._transport.connected:
             return True
@@ -356,6 +377,13 @@ class UCoreKernel(Kernel):
             except Exception:
                 log.debug("error closing dead transport", exc_info=True)
             self._transport = None
+
+        if self._transport_type == "serial":
+            self._serial_port_path = self._resolve_serial_port()
+            if not self._serial_port_path:
+                log.warning("no JMP-speaking serial device on the bus")
+                return False
+
         try:
             await self._connect_transport()
             return True
