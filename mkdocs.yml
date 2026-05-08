@@ -43,6 +43,7 @@ nav:
   - Documentation:
     - Pipes: pipes.md
     - uagent: uagent.md
+    - Skills: skills.md
 
 markdown_extensions:
   - admonition
