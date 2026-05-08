@@ -13,6 +13,11 @@ dependencies = [
     "agent-client-protocol",
     "jupyter-ai-acp-client",
     "jupyter-ai-persona-manager",
+    # Pulled transitively through jupyter-ai; the loose upstream pin
+    # let pip resolve to 0.1.2 which has a message_cache KeyError that
+    # crashes the kernel websocket. Pin to 0.2.0+ where that path was
+    # rewritten.
+    "jupyter-server-documents>=0.2.0",
 ]
 
 [project.entry-points."jupyter_ai.personas"]
@@ -22,4 +27,4 @@ ucore-acp = "uagent.persona:UCorePersona"
 packages = ["uagent"]
 
 [tool.setuptools.package-data]
-uagent = ["prompts/*.txt", "skills/*.yaml", "skills/*.txt", "static/*.svg"]
+uagent = ["prompts/*.txt", "skills/*.md", "static/*.svg"]
