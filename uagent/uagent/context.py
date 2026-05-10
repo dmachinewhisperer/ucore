@@ -1,24 +1,31 @@
 # uagent context — assembles and manages the LLM context window.
 #
-# Skills live as .md files with YAML frontmatter:
+# Skills are markdown files with YAML frontmatter:
 #
 #     ---
 #     name: my_skill
 #     description: one-line summary used in the prompt index
 #     keywords: [a, b, c]
+#     inherits: [parent_platform]   # only meaningful inside a platform dir
 #     ---
 #     skill body in markdown ...
 #
-# Skills are discovered from up to three directories, in increasing order of
-# precedence (later overrides earlier on name collision):
+# Skills are discovered from up to four sources, in increasing order of
+# precedence (later sources override earlier ones — at the *file* level,
+# keyed by filename basename, no body merging):
 #
-#   1. shipped:           uagent/skills/                                   (always)
-#   2. notebook-local:    $UAGENT_NOTEBOOK_ROOT/.ucore/skills/             (if set & exists)
-#   3. user override:     $UAGENT_SKILL_DIR                                (if set & exists)
+#   1. shipped harness skills:    uagent/skills/*.md  (top-level)
+#   2. platforms:                 uagent/skills/platforms/<plat>/*.md
+#                                 for each <plat> in $UAGENT_PLATFORM
+#                                 (parents resolved via `inherits:` first)
+#   3. notebook-local:            $UAGENT_NOTEBOOK_ROOT/.ucore/skills/*.md
+#   4. user override:             $UAGENT_SKILL_DIR/*.md
 #
-# Custom skills live entirely in env-driven dirs — nothing is written into the
-# package on disk, so a kernel restart with no env vars cleanly reverts to the
-# shipped set.
+# Platform inheritance: any file in a platform dir may carry `inherits:` in
+# frontmatter. The loader unions those declarations across the dir and loads
+# parent platforms first. A child platform overrides on filename — its
+# peripherals.md fully replaces the parent's peripherals.md (no concat).
+# Files only the child has are added; files only the parent has are inherited.
 
 from __future__ import annotations
 
@@ -29,22 +36,7 @@ import yaml
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SHIPPED_SKILLS_DIR = Path(__file__).parent / "skills"
-
-
-def _skill_dirs() -> list[Path]:
-    """Resolution order: shipped → notebook-local → user override."""
-    dirs: list[Path] = [SHIPPED_SKILLS_DIR]
-    nb_root = os.environ.get("UAGENT_NOTEBOOK_ROOT")
-    if nb_root:
-        candidate = Path(nb_root) / ".ucore" / "skills"
-        if candidate.is_dir():
-            dirs.append(candidate)
-    override = os.environ.get("UAGENT_SKILL_DIR")
-    if override:
-        candidate = Path(override)
-        if candidate.is_dir():
-            dirs.append(candidate)
-    return dirs
+PLATFORMS_DIR = SHIPPED_SKILLS_DIR / "platforms"
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -73,13 +65,81 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return fm, body
 
 
-def _load_dir(d: Path) -> dict[str, dict]:
-    """Walk one skill directory; return ``{name: skill_dict}``.
+def _platform_inherits(platform_dir: Path) -> list[str]:
+    """Union of `inherits:` declarations from all skill files in a platform dir."""
+    parents: list[str] = []
+    for path in sorted(platform_dir.glob("*.md")):
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        fm, _ = _parse_frontmatter(text)
+        for parent in (fm.get("inherits") or []):
+            if isinstance(parent, str) and parent not in parents:
+                parents.append(parent)
+    return parents
 
-    A skill_dict has keys: name, description, keywords (list), body, source.
-    Files missing a ``name`` field are skipped.
+
+def _resolve_platform_chain(requested: list[str]) -> list[Path]:
+    """Resolve ``UAGENT_PLATFORM`` into an ordered list of platform dirs.
+
+    Parents (via ``inherits:``) come before children. Cycles are broken by
+    visiting each platform at most once. Unknown platforms are silently
+    skipped — best-effort, no crashes for typos.
+    """
+    seen: set[str] = set()
+    ordered: list[Path] = []
+
+    def visit(name: str) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        platform_dir = PLATFORMS_DIR / name
+        if not platform_dir.is_dir():
+            return
+        for parent in _platform_inherits(platform_dir):
+            visit(parent)
+        ordered.append(platform_dir)
+
+    for name in requested:
+        visit(name.strip())
+    return ordered
+
+
+def _skill_dirs() -> list[Path]:
+    """Resolution order: shipped harness → platforms → notebook → user."""
+    dirs: list[Path] = [SHIPPED_SKILLS_DIR]
+
+    requested = [
+        p for p in os.environ.get("UAGENT_PLATFORM", "").split(",") if p.strip()
+    ]
+    dirs.extend(_resolve_platform_chain(requested))
+
+    nb_root = os.environ.get("UAGENT_NOTEBOOK_ROOT")
+    if nb_root:
+        candidate = Path(nb_root) / ".ucore" / "skills"
+        if candidate.is_dir():
+            dirs.append(candidate)
+
+    override = os.environ.get("UAGENT_SKILL_DIR")
+    if override:
+        candidate = Path(override)
+        if candidate.is_dir():
+            dirs.append(candidate)
+
+    return dirs
+
+
+def _load_dir(d: Path) -> dict[str, dict]:
+    """Read every ``*.md`` directly in ``d`` (non-recursive); return ``{stem: skill}``.
+
+    Keyed by filename basename (Path.stem). The frontmatter ``name`` is used for
+    matching/display, but the override key is the filename — that's how
+    platform inheritance composes.
     """
     out: dict[str, dict] = {}
+    if not d.is_dir():
+        return out
     for path in sorted(d.glob("*.md")):
         try:
             text = path.read_text()
@@ -87,12 +147,10 @@ def _load_dir(d: Path) -> dict[str, dict]:
             continue
         fm, body = _parse_frontmatter(text)
         name = fm.get("name") or path.stem
-        if not name:
-            continue
         keywords = fm.get("keywords") or []
         if not isinstance(keywords, list):
             keywords = []
-        out[name] = {
+        out[path.stem] = {
             "name": name,
             "description": fm.get("description", ""),
             "keywords": [str(k).lower() for k in keywords],
@@ -103,7 +161,7 @@ def _load_dir(d: Path) -> dict[str, dict]:
 
 
 def load_skill_index() -> list[dict]:
-    """Return all visible skills, with later dirs overriding earlier ones."""
+    """Return all visible skills, with later dirs overriding earlier on filename."""
     merged: dict[str, dict] = {}
     for d in _skill_dirs():
         merged.update(_load_dir(d))

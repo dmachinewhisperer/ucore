@@ -27,4 +27,9 @@ ucore-acp = "uagent.persona:UCorePersona"
 packages = ["uagent"]
 
 [tool.setuptools.package-data]
-uagent = ["prompts/*.txt", "skills/*.md", "static/*.svg"]
+uagent = [
+    "prompts/*.txt",
+    "skills/*.md",
+    "skills/platforms/*/*.md",
+    "static/*.svg",
+]
