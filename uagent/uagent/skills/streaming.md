@@ -1,100 +1,48 @@
 ---
 name: streaming
-description: Stream values from the device to the host using named pipes — producer threads, subscribe / collect / live_plot, and clean shutdown.
-keywords: [pipe, stream, subscribe, collect, live_plot, producer, thread, plot, matplotlib, animate, broadcast, sample]
+description: Stream values from the device to the host using named pipes — producer threads, subscribe / collect / live_plot.
+keywords: [pipe, stream, subscribe, collect, live_plot, producer, thread, plot, matplotlib, animate, broadcast, sample, decoder]
 ---
 
-Named **pipes** are how the device pushes a continuous stream of bytes to the host. They're the right tool any time you want more than one printed value — sensor sampling, audio, periodic state, anything you'd plot.
+µcore exposes a custom **named-pipe** API for moving a continuous stream of bytes from the device to the host. Use this whenever you'd otherwise be tempted to `print()` in a loop — sensor sampling, audio, periodic state, anything to plot.
 
-The pattern has three parts:
+This API is project-specific; the names below don't exist outside µcore.
 
-1. A device-side producer (usually a thread) writes packed bytes into a named pipe.
-2. The host subscribes to that name and consumes the stream — either by collecting a finite batch (`collect`) or animating live (`live_plot`).
-3. The producer exits cleanly when the pipe is closed from either side.
+## Device-side API (`%%ucore` cells)
 
-## Device-side producer
+- `ucore.open_pipe(name)` — create or attach to a named byte channel; returns an object with `.write(bytes)`.
+- `ucore.is_pipe_open(name)` — boolean, polled by producer threads as a graceful-exit signal.
+- `ucore.close_pipe(name)` — close the channel from the device side. Producer threads exit on their next `is_pipe_open()` check.
 
-```python
-%%ucore
-import ucore, _thread, time, struct, math
+## Host-side API (`from ukernel.pipes import …`)
 
-pipe = ucore.open_pipe("sine")
+The two primitives:
 
-def _run():
-    t0 = time.ticks_ms()
-    while ucore.is_pipe_open("sine"):
-        t = time.ticks_diff(time.ticks_ms(), t0) / 1000.0
-        pipe.write(struct.pack("<f", math.sin(2 * math.pi * 1.0 * t)))
-        time.sleep_ms(100)            # 10 Hz
+- `subscribe(name)` — low-level iterator yielding bytes chunks. Use as `with subscribe("x") as p:` so the socket closes on scope exit. Build whatever you want on top — custom plots, dashboards, async pipelines, file recorders.
+- `collect(name, *, n=None, seconds=30, decoder=None, allow_empty=False)` — block until a finite batch arrives, return a numpy array. Has a 30 s default `seconds=` ceiling to prevent runaway hangs. Raises `TimeoutError` on zero samples (override with `allow_empty=True`).
 
-_thread.start_new_thread(_run, ())
-print("sine producer started")
-```
+The convenience layer on top:
 
-The `is_pipe_open()` guard is important — it lets you stop the thread later from another cell (`%%ucore` → `ucore.close_pipe("sine")`) without `_thread.exit()` gymnastics. The thread sees the pipe close on its next loop iteration and returns.
+- `live_plot(name, *, window=200, ylim=(-1.5, 1.5), title=None, interval=40, duration=None, decoder=None)` — fire-and-forget animated line chart. Returns immediately, runs in the background. Useful for the common case but not the only way; for anything beyond a single line in a sliding window, drop down to `subscribe` and drive your own matplotlib / plotly / whatever.
+- `stop_live(name=None)` — tear down a single live plot, or all of them.
 
-## Host-side consumers
+## Semantics worth knowing
 
-Three APIs, all in `ukernel.pipes`. Pick by use case:
+- One device-side `pipe.write(bytes)` = one host-side chunk on the iterator. Framing is automatic and invisible.
+- **Default wire format is little-endian float32.** Override on either side with `decoder=` (host) or your own `struct.pack` (device).
+- **Pipe names are case-sensitive strings; mismatch fails silently** — host hangs / times out, device writes to a void. Always cross-check the string between producer and consumer.
+- `live_plot` stops on any of: producer closes the pipe, `stop_live()` is called, or `duration=` elapses. Re-running the same cell tears down the previous instance cleanly.
+- `live_plot` default ylim is `(-1.5, 1.5)`. **Constant signals near zero look blank with the default ylim** — pass `ylim=None` to autoscale, or set explicit bounds matching your data range.
+- Closing direction matters: closing the host socket alone does **not** stop the device producer. Call `ucore.close_pipe(name)` on the device to actually halt it.
 
-### `collect` — finite batch, then return
+## Producer-thread pattern (non-obvious bit)
 
-Blocks until `n` samples *or* `seconds` of wall time pass (whichever first). Returns a numpy array. Default safety ceiling: 30 s, so a missing producer can't hang the kernel.
+A device-side producer **must** check `ucore.is_pipe_open(name)` each loop iteration. That's how the producer exits cleanly when the pipe is closed. Forgetting it leaks a thread on the device — it'll keep `pipe.write()`-ing into a closed channel forever (or until the next reset).
 
-```python
-from ukernel.pipes import collect
-samples = collect("sine", n=200)            # at most 200 samples or 30 s
-samples = collect("sine", seconds=5)        # 5 s of data, however many samples
-```
+## Cell placement
 
-Raises `TimeoutError` if zero samples arrived (almost always means no producer is running). Pass `allow_empty=True` to suppress.
+Producer in a `%%ucore` cell. Consumer in a plain Python cell. The magic split applies — see `device_basics`.
 
-### `live_plot` — animated chart in a sliding window
+## Plotting backend
 
-```python
-%matplotlib widget
-from ukernel.pipes import live_plot
-live_plot("sine", window=200, ylim=(-1.2, 1.2), title="sine (device)")
-live_plot("temp", window=120, ylim=None, title="MCU temp")     # autoscale
-live_plot("sine", window=200, duration=10)                     # stops after 10 s
-```
-
-Returns immediately. The chart updates in the background until: the producer closes the pipe, `stop_live("sine")` is called, or `duration` elapses. Re-running the cell tears down the previous instance cleanly.
-
-### `subscribe` — low-level iterator
-
-For custom processing (your own animation, writing to disk, etc.):
-
-```python
-import struct
-from ukernel.pipes import subscribe
-
-with subscribe("sine") as p:
-    for i, chunk in enumerate(p):
-        if i >= 30: break
-        (v,) = struct.unpack("<f", chunk)
-        print(f"[{i:3d}] {v:+.4f}")
-```
-
-One iteration = one device-side `pipe.write(...)` call. The `with` block closes the socket on exit.
-
-## Shutting down
-
-To stop a producer and clean up:
-
-```python
-%%ucore
-import ucore
-ucore.close_pipe("sine")     # producer thread exits on next loop
-```
-
-```python
-from ukernel.pipes import stop_live
-stop_live()                  # tear down all host-side animations
-```
-
-`stop_live()` with no args stops every live plot; pass a name to stop just one.
-
-## Encoding
-
-The default decoder on the host expects little-endian `float32` (`struct.pack("<f", value)` on the device). For other types pass `decoder=` to `collect` / `live_plot` / iterate raw bytes via `subscribe`.
+`live_plot` requires `%matplotlib widget` somewhere in the notebook (the ipympl backend) for the animation to render. `collect` works with any backend.
