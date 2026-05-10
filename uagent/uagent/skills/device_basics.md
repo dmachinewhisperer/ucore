@@ -1,40 +1,29 @@
 ---
 name: device_basics
-description: How code is split between the ESP32 device and the host kernel, how cells are routed, and how the kernel handles unplug/replug.
-keywords: [magic, cell, ucore, device, host, micropython, serial, attach, replug, hotplug, restart, kernel]
+description: How code is split between the device and the host kernel, and how the kernel handles device unplug/replug.
+keywords: [magic, cell, ucore, device, host, micropython, serial, attach, replug, hotplug, restart, kernel, sub-kernel]
 ---
 
 A notebook running the µcore kernel has two execution targets:
 
-- **Device** — MicroPython on the ESP32, reached via the JMP transport over USB serial.
+- **Device** — MicroPython on the connected microcontroller, reached via the JMP transport over USB serial.
 - **Host** — a regular CPython sub-kernel running inside the same Jupyter kernel process.
 
-A cell is dispatched by its first non-blank line. If it starts with `%%ucore`, the body runs on the device. Otherwise it runs on the host.
+Routing is by cell magic. A cell whose first non-blank line is `%%ucore` runs on the device; everything else runs on the host.
 
-```python
-%%ucore
-# runs on the ESP32
-import sys
-print(sys.implementation)
-```
+Host and device share **no state**. Names bound in a `%%ucore` cell are not visible from a host cell, and vice versa. Imports, module state, and `globals()` do not cross the boundary. To move data between them, use a pipe (see the `streaming` skill) or print structured output and parse it.
 
-```python
-# runs on the host (regular Python)
-import platform
-print(platform.python_version())
-```
+A `%%ucore` cell's stdout is the device's `print()` output, transported over JMP and rendered in the cell — not a captured pipe.
 
-**Variables do not cross the boundary.** A name bound in a `%%ucore` cell is not visible from a host cell, and vice versa. To move data between them, use a pipe (see the `streaming` skill) or print structured output and read it back.
+## Hot-plug
 
-## Hot-plug behaviour
+The kernel re-resolves the serial port on every cell run. Plug, unplug, and replug do not require a kernel restart; the next cell will reattach. A cell that fails mid-execution because the device went away returns a clear `ConnectionError`; rerunning the cell after the device is back will succeed.
 
-The kernel discovers the ESP32 over USB serial at startup and again on every cell run. If the device wasn't attached at startup, no restart is needed — plug it in and re-run the cell. The kernel will probe the bus and bind to the first JMP-speaking serial device it finds.
+If multiple devices are on the bus, the kernel picks the first JMP-speaking one and logs which.
 
-If you replug the device while a cell is mid-execution, that cell will fail with `ConnectionError: Device not connected (serial)`. Re-run the cell; the kernel will reattach automatically.
+## When you actually need to restart the kernel
 
-## What requires a kernel restart
+Almost never. Two cases:
 
-Almost nothing. You generally only need to restart when:
-
-- You install or upgrade an `ipykernel`-side Python package and want it imported fresh.
-- The serial link has gotten into a desynchronised state (rare; symptoms are `SyntaxError` on a previously-working `%%ucore` cell — see the `debugging` skill).
+- A `SyntaxError` on a `%%ucore` cell that just worked — this is JMP frame desync, not a real syntax error. See the `debugging` skill.
+- You changed an installed Python package on the host side and want it re-imported into the sub-kernel.
